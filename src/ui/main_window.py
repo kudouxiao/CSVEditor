@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLabel, QSplitter, QListWidget, 
                              QAbstractItemView, QFrame, QTabWidget, QScrollArea, 
                              QGroupBox, QCheckBox, QDoubleSpinBox, QComboBox, 
-                             QShortcut, QFileDialog, QMessageBox, QListWidgetItem, QSpinBox)
+                             QShortcut, QFileDialog, QMessageBox, QListWidgetItem, QSpinBox,QApplication)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QKeySequence
 from scipy.interpolate import PchipInterpolator
@@ -20,7 +20,7 @@ from src.ui.widgets.curve_editor import CurveEditor
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("G1 Pro Editor (SMPL & BVH Support)")
+        self.setWindowTitle("G1 Pro Editor")
         self.resize(1600, 1000)
         
         # 调试输出：检查所有路径
@@ -54,8 +54,6 @@ class MainWindow(QMainWindow):
                 self.status_bar.showMessage(f"Loaded Robot Data: {frames} frames.")
         
         # 2. 根据配置加载参考动作 (SMPL vs BVH)
-        ref_loaded = False
-        
         # 定义加载函数以避免重复代码
         def try_load_smpl():
             if os.path.exists(DEFAULT_SMPLX_DATA_PATH) and os.path.exists(SMPLX_BODY_MODEL_DIR):
@@ -92,9 +90,6 @@ class MainWindow(QMainWindow):
                 self.status_bar.showMessage("Loaded Robot & SMPL Ref (Auto)")
             elif try_load_bvh():
                 self.status_bar.showMessage("Loaded Robot & BVH Ref (Auto)")
-        
-        if not ref_loaded:
-            print("No reference motion loaded (SMPL/BVH not found).")
 
     def init_ui(self):
         main_widget = QWidget(); self.setCentralWidget(main_widget)
@@ -109,12 +104,12 @@ class MainWindow(QMainWindow):
         self.chk_ghost = QCheckBox("👻 显示原数据(Ghost)")
         self.chk_ghost.stateChanged.connect(self.toggle_ghost)
         
-        btn_save = QPushButton("💾 另存为"); btn_save.clicked.connect(self.save_as)
-        btn_load_smpl = QPushButton("🕺 加载参考"); btn_load_smpl.clicked.connect(self.load_smplx_ref)
+        btn_save = QPushButton("💾 另存为")
+        btn_save.clicked.connect(self.save_as)
         
         top_bar.addWidget(self.btn_undo); top_bar.addWidget(self.btn_redo); top_bar.addSpacing(10)
         top_bar.addWidget(self.chk_ghost); top_bar.addStretch()
-        top_bar.addWidget(btn_save); top_bar.addWidget(btn_load_smpl)
+        top_bar.addWidget(btn_save)
         layout.addLayout(top_bar)
         
         splitter = QSplitter(Qt.Horizontal); layout.addWidget(splitter)

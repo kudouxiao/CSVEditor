@@ -25,6 +25,7 @@ class G1Backend(QObject):
 
         self.lock = threading.Lock()
         self.joint_mapping = {}
+        self.joint_id_mapping = {}  # [新增] CSV Index -> Joint ID (用于查限位)
         self.modified_frames = set()
         self.undo_stack = []
         self.redo_stack = []
@@ -45,25 +46,69 @@ class G1Backend(QObject):
             if isinstance(self.df.iloc[0, 0], str): self.df = pd.read_csv(csv_path)
             self.df_orig = self.df.copy()
             self.undo_stack.clear(); self.redo_stack.clear()
+            
             self.model = mujoco.MjModel.from_xml_path(str(model_path))
             self.model.opt.disableflags = 65535 
             self.data = mujoco.MjData(self.model)
             
-            model_j_names = {}
+            # === 建立双重映射 ===
+            model_j_names = {} # Name -> Qpos Addr
+            model_j_ids = {}   # Name -> Joint ID
+            
             q_ptr = 0
             for i in range(self.model.njnt):
                 name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i)
-                if self.model.jnt_type[i] == 0: q_ptr += 7; continue
-                model_j_names[name] = q_ptr; q_ptr += 1
+                # 跳过自由关节(Root)
+                if self.model.jnt_type[i] == 0: 
+                    q_ptr += 7
+                    continue
+                
+                model_j_names[name] = q_ptr
+                model_j_ids[name] = i # 记录 Joint ID
+                q_ptr += 1
+            
+            self.joint_mapping = {}
+            self.joint_id_mapping = {} # [新增]
+            
             for idx, name in enumerate(self.csv_joint_names):
                 simple = name.replace("_joint", "")
                 for m_n, addr in model_j_names.items():
-                    if simple in m_n or m_n in simple: self.joint_mapping[idx] = addr; break
+                    if simple in m_n or m_n in simple: 
+                        self.joint_mapping[idx] = addr
+                        self.joint_id_mapping[idx] = model_j_ids[m_n] # 绑定 ID
+                        break
             
             return True, len(self.df)
         except Exception as e:
             print(f"Load Error: {e}")
             return False, 0
+
+    # === [新增] 获取限位函数 ===
+    def get_joint_limits(self, ui_index):
+        """
+        根据 UI 列表索引返回 (min, max) 或 None
+        ui_index: 0-6 (Root), 7+ (Joints)
+        """
+        if self.model is None: return None
+        
+        # Root 没有限位
+        if ui_index < 7: return None
+        
+        # 映射回 CSV 索引
+        csv_idx = ui_index - 7
+        
+        if csv_idx in self.joint_id_mapping:
+            jnt_id = self.joint_id_mapping[csv_idx]
+            
+            # 检查关节是否开启了限位 (jnt_limited)
+            # limited: 0=false, 1=true
+            is_limited = self.model.jnt_limited[jnt_id]
+            
+            if is_limited:
+                # jnt_range 形状为 (njnt, 2)
+                return self.model.jnt_range[jnt_id]
+        
+        return None
 
     # === 稳健的 SMPL-X 加载 ===
     def load_smplx_data(self, smplx_file, smplx_body_model_path):

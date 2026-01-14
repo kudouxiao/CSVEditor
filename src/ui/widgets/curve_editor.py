@@ -36,6 +36,19 @@ class CurveEditor(pg.PlotWidget):
         self.addItem(self.scatter_item)
         self.spline_preview_curve = self.plot([], pen=pg.mkPen('#FFCC00', width=2, style=Qt.DashLine))
         self.spline_preview_curve.setZValue(190)
+
+        # === 3. 限位线 (新增) ===
+        # 红色虚线，用于指示物理极限
+        limit_pen = pg.mkPen('#FF3333', width=1.5, style=Qt.DashLine)
+        self.limit_upper = pg.InfiniteLine(angle=0, pen=limit_pen, movable=False)
+        self.limit_lower = pg.InfiniteLine(angle=0, pen=limit_pen, movable=False)
+        self.limit_upper.setZValue(50)
+        self.limit_lower.setZValue(50)
+        self.addItem(self.limit_upper)
+        self.addItem(self.limit_lower)
+        # 默认隐藏
+        self.limit_upper.hide()
+        self.limit_lower.hide()
         
         self.curves = {}
         self.selected_joint_idx = None
@@ -75,6 +88,24 @@ class CurveEditor(pg.PlotWidget):
         if len(selected_indices) > 0:
             self.selected_joint_idx = selected_indices[0]
             
+            # === 更新限位显示 ===
+            # 调用后端获取限位
+            limits = self.backend_ref.get_joint_limits(self.selected_joint_idx)
+            
+            if limits is not None:
+                min_val, max_val = limits
+                self.limit_lower.setPos(min_val)
+                self.limit_upper.setPos(max_val)
+                self.limit_lower.show()
+                self.limit_upper.show()
+                
+                # 可选：如果在样条模式，还可以添加限位标签文本
+            else:
+                self.limit_lower.hide()
+                self.limit_upper.hide()
+            # ====================
+
+            # 绘制 Ghost
             if self.show_ghost:
                 col = self.selected_joint_idx
                 orig_data = self.backend_ref.df_orig.iloc[:, col].values
@@ -82,23 +113,30 @@ class CurveEditor(pg.PlotWidget):
             else:
                 self.ghost_curve.setData([])
 
+            # 绘制背景线
             for idx in selected_indices[1:]:
-                col = idx
-                data = self.backend_ref.df.iloc[:, col].values
-                curve = self.plot(data, pen=pg.mkPen((80, 80, 80), width=1))
-                curve.setZValue(5)
-                self.curves[idx] = curve
+                col = idx; data = self.backend_ref.df.iloc[:, col].values
+                curve = self.plot(data, pen=pg.mkPen((80, 80, 80), width=1)); curve.setZValue(5); self.curves[idx] = curve
             
-            col = self.selected_joint_idx
-            data = self.backend_ref.df.iloc[:, col].values
-            main_curve = self.plot(data, pen=pg.mkPen('#00ffff', width=3))
-            main_curve.setZValue(20)
-            self.curves[self.selected_joint_idx] = main_curve
+            # 绘制主线
+            col = self.selected_joint_idx; data = self.backend_ref.df.iloc[:, col].values
+            main_curve = self.plot(data, pen=pg.mkPen('#00ffff', width=3)); main_curve.setZValue(20); self.curves[self.selected_joint_idx] = main_curve
             
+            # 自动调整视野，确保限位线也在视野内 (如果开启)
             self.autoRange()
+            # 稍微扩展 Y 轴以看清限位
+            if limits is not None:
+                yr = self.viewRange()[1]
+                min_y, max_y = yr[0], yr[1]
+                # 确保当前视图包含限位
+                new_min = min(min_y, limits[0] - 0.2)
+                new_max = max(max_y, limits[1] + 0.2)
+                self.setYRange(new_min, new_max, padding=0)
         else:
             self.selected_joint_idx = None
             self.ghost_curve.setData([])
+            self.limit_lower.hide()
+            self.limit_upper.hide()
 
     def on_line_dragged(self):
         idx = int(self.current_frame_line.value())
