@@ -1,7 +1,6 @@
 # G1 Motion Refinement Tool (G1 Pro Editor)
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 [![MuJoCo](https://img.shields.io/badge/Render-MuJoCo-orange)](https://mujoco.org/)
 
 A professional-grade GUI tool designed for refining, editing, and visualizing motion capture data for the **Unitree G1 Humanoid Robot**.
