@@ -1,11 +1,11 @@
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt
-from scipy.interpolate import CubicSpline, PchipInterpolator
+from scipy.interpolate import CubicSpline
 
 class CurveEditor(pg.PlotWidget):
     """
-    CurveEditor v3.0: 集成 Ghost, Spline Editing, Tangent Clamp, Soft Drag
+    CurveEditor v3.2: 全局端点修正 + 局部软选择
     """
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -25,12 +25,12 @@ class CurveEditor(pg.PlotWidget):
         self.current_frame_line.setZValue(100)
         self.addItem(self.current_frame_line)
         
-        # 3. Ghost Curve (Layer 0, 灰色虚线) - 新增
+        # 3. Ghost Curve
         self.ghost_curve = self.plot([], pen=pg.mkPen((100, 100, 100), width=1, style=Qt.DashLine))
         self.ghost_curve.setZValue(0)
         self.show_ghost = False
         
-        # 4. Spline Anchors (Layer 200) - 新增
+        # 4. Spline Anchors
         self.scatter_item = pg.ScatterPlotItem(size=15, pen=pg.mkPen('w'), brush=pg.mkBrush('#FFCC00'))
         self.scatter_item.setZValue(200)
         self.addItem(self.scatter_item)
@@ -43,8 +43,9 @@ class CurveEditor(pg.PlotWidget):
         self.main_window_ref = None
         
         # 交互状态
-        self.is_editing = False # 软拖拽模式
-        self.spline_mode_active = False # 样条编辑模式
+        self.is_editing = False 
+        self.drag_mode = "LOCAL_CENTER" # GLOBAL_START, GLOBAL_END, LOCAL_LEFT, LOCAL_RIGHT, LOCAL_CENTER
+        self.spline_mode_active = False 
         self.drag_start_pos = None
         self.drag_start_data = None
         
@@ -58,12 +59,10 @@ class CurveEditor(pg.PlotWidget):
         self.backend_ref = backend
         self.main_window_ref = main_window
         self.current_frame_line.sigDragged.connect(self.on_line_dragged)
-        # 绑定选区变化信号 (需要在 MainWindow 里连接槽函数)
         self.region.sigRegionChanged.connect(main_window.on_region_changed)
 
     def set_ghost_visible(self, visible):
         self.show_ghost = visible
-        # 刷新显示
         if self.selected_joint_idx is not None:
             self.update_curves([self.selected_joint_idx])
 
@@ -76,7 +75,6 @@ class CurveEditor(pg.PlotWidget):
         if len(selected_indices) > 0:
             self.selected_joint_idx = selected_indices[0]
             
-            # 绘制 Ghost (原始数据)
             if self.show_ghost:
                 col = self.selected_joint_idx
                 orig_data = self.backend_ref.df_orig.iloc[:, col].values
@@ -84,7 +82,6 @@ class CurveEditor(pg.PlotWidget):
             else:
                 self.ghost_curve.setData([])
 
-            # 绘制背景线
             for idx in selected_indices[1:]:
                 col = idx
                 data = self.backend_ref.df.iloc[:, col].values
@@ -92,7 +89,6 @@ class CurveEditor(pg.PlotWidget):
                 curve.setZValue(5)
                 self.curves[idx] = curve
             
-            # 绘制主编辑线
             col = self.selected_joint_idx
             data = self.backend_ref.df.iloc[:, col].values
             main_curve = self.plot(data, pen=pg.mkPen('#00ffff', width=3))
@@ -109,14 +105,13 @@ class CurveEditor(pg.PlotWidget):
         if self.main_window_ref:
             self.main_window_ref.update_frame_from_graph(idx)
 
-    # === Spline Logic ===
+    # === Spline Mode Logic ===
     def start_spline_mode(self, start_frame, end_frame, num_anchors=5):
         if self.selected_joint_idx is None: return
         self.spline_mode_active = True
         self.region.setMovable(False)
         col = self.selected_joint_idx
         
-        # 计算边界切线 (保持连续性)
         slope_in = 0.0; slope_out = 0.0
         if start_frame > 0:
             slope_in = self.backend_ref.df.iloc[start_frame, col] - self.backend_ref.df.iloc[start_frame-1, col]
@@ -125,7 +120,6 @@ class CurveEditor(pg.PlotWidget):
             slope_out = self.backend_ref.df.iloc[end_frame+1, col] - self.backend_ref.df.iloc[end_frame, col]
         self.spline_boundary_slopes = (slope_in, slope_out)
         
-        # 生成锚点
         self.spline_anchors_x = np.linspace(start_frame, end_frame, num_anchors).astype(int)
         self.spline_anchors_y = self.backend_ref.df.iloc[self.spline_anchors_x, col].values
         self.update_spline_visuals()
@@ -136,7 +130,6 @@ class CurveEditor(pg.PlotWidget):
         
         if len(self.spline_anchors_x) >= 2:
             try:
-                # 使用 CubicSpline 施加边界约束
                 cs = CubicSpline(self.spline_anchors_x, self.spline_anchors_y, 
                                  bc_type=((1, self.spline_boundary_slopes[0]), (1, self.spline_boundary_slopes[1])))
                 x_new = np.arange(self.spline_anchors_x[0], self.spline_anchors_x[-1] + 1)
@@ -160,7 +153,6 @@ class CurveEditor(pg.PlotWidget):
         
         self.cancel_spline_mode()
         self.update_curves([self.selected_joint_idx])
-        # 更新机器人姿态
         curr = int(self.current_frame_line.value())
         self.backend_ref.set_frame(curr)
 
@@ -172,12 +164,11 @@ class CurveEditor(pg.PlotWidget):
         self.spline_preview_curve.setData([])
         self.dragged_anchor_index = None
 
-    # === Interaction Logic ===
+    # === Interaction Logic (核心修改部分) ===
     def mousePressEvent(self, ev):
-        # 1. Spline Anchor Click
+        # 1. 样条模式点击
         if self.spline_mode_active and ev.button() == Qt.LeftButton:
             pos = self.plotItem.vb.mapSceneToView(ev.pos())
-            # 简单的命中检测
             x_tol = (self.viewRange()[0][1] - self.viewRange()[0][0]) * 0.02
             y_tol = (self.viewRange()[1][1] - self.viewRange()[1][0]) * 0.05
             for i, (ax, ay) in enumerate(zip(self.spline_anchors_x, self.spline_anchors_y)):
@@ -186,30 +177,71 @@ class CurveEditor(pg.PlotWidget):
                     ev.accept()
                     return
         
-        # 2. Soft Drag Mode (Ctrl+Click)
+        # 2. 软拖拽模式 (Ctrl+Click)
         if not self.spline_mode_active and (ev.modifiers() & Qt.ControlModifier) and self.selected_joint_idx is not None and ev.button() == Qt.LeftButton:
             self.is_editing = True
             ev.accept()
             self.backend_ref.snapshot()
             
-            # PyQt5 坐标转换
+            # 坐标转换
             widget_point = ev.pos()
             scene_point = self.mapToScene(widget_point)
             mouse_point = self.plotItem.vb.mapSceneToView(scene_point)
-            
             self.drag_start_pos = mouse_point.y()
+            click_x = mouse_point.x()
+            
+            # 获取范围信息
             r_min, r_max = self.region.getRegion()
-            s, e = int(r_min), int(r_max)
-            s = max(0, s); e = min(len(self.backend_ref.df)-1, e)
+            s_local, e_local = int(r_min), int(r_max)
+            total_len = len(self.backend_ref.df)
             col = self.selected_joint_idx
-            self.drag_start_data = self.backend_ref.df.iloc[s:e+1, col].values.copy()
+            
+            # === 判断全局/局部模式 ===
+            # 判定阈值：总长度的 5%
+            global_threshold = total_len * 0.05
+            
+            if click_x < global_threshold:
+                # 点击了整段曲线的开头 -> 全局左端点调节
+                self.drag_mode = "GLOBAL_START"
+                if self.main_window_ref: self.main_window_ref.status_bar.showMessage("模式: 全局起点调节 (终点固定)")
+                # 备份整列数据
+                self.drag_start_data = self.backend_ref.df.iloc[:, col].values.copy()
+                
+            elif click_x > (total_len - global_threshold):
+                # 点击了整段曲线的结尾 -> 全局右端点调节
+                self.drag_mode = "GLOBAL_END"
+                if self.main_window_ref: self.main_window_ref.status_bar.showMessage("模式: 全局终点调节 (起点固定)")
+                # 备份整列数据
+                self.drag_start_data = self.backend_ref.df.iloc[:, col].values.copy()
+                
+            else:
+                # 局部选区模式 (原有逻辑)
+                # 进一步细分局部模式
+                s_local = max(0, s_local); e_local = min(total_len-1, e_local)
+                region_len = e_local - s_local
+                
+                # 备份选区数据
+                self.drag_start_data = self.backend_ref.df.iloc[s_local:e_local+1, col].values.copy()
+                
+                # 判断在选区内的相对位置
+                if region_len > 0:
+                    normalized_x = (click_x - s_local) / region_len
+                    if normalized_x < 0.2:
+                        self.drag_mode = "LOCAL_LEFT"
+                        if self.main_window_ref: self.main_window_ref.status_bar.showMessage("模式: 局部左侧调节")
+                    elif normalized_x > 0.8:
+                        self.drag_mode = "LOCAL_RIGHT"
+                        if self.main_window_ref: self.main_window_ref.status_bar.showMessage("模式: 局部右侧调节")
+                    else:
+                        self.drag_mode = "LOCAL_CENTER"
+                        if self.main_window_ref: self.main_window_ref.status_bar.showMessage("模式: 局部整体调节")
+            
             self.region.setMovable(False)
         else:
             if not self.spline_mode_active: self.region.setMovable(True)
             super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev):
-        # 坐标转换
         widget_point = ev.pos()
         scene_point = self.mapToScene(widget_point)
         pos = self.plotItem.vb.mapSceneToView(scene_point)
@@ -229,27 +261,60 @@ class CurveEditor(pg.PlotWidget):
             ev.accept()
             y_curr = pos.y()
             delta_y = y_curr - self.drag_start_pos
+            col = self.selected_joint_idx
             
-            r_min, r_max = self.region.getRegion()
-            s, e = int(r_min), int(r_max)
-            s = max(0, s); e = min(len(self.backend_ref.df)-1, e)
+            # === 根据模式应用修改 ===
             
-            if s < e and self.drag_start_data is not None:
-                length = e - s + 1
-                x = np.linspace(-np.pi, np.pi, length)
-                weights = (np.cos(x) + 1) / 2 
-                new_values = self.drag_start_data + (delta_y * weights)
+            if "GLOBAL" in self.drag_mode:
+                # 全局模式：操作整个 DataFrame 列
+                total_len = len(self.backend_ref.df)
+                x = np.linspace(0, 1, total_len)
                 
-                col = self.selected_joint_idx
-                self.backend_ref.df.iloc[s:e+1, col] = new_values
-                self.backend_ref.modified_frames.update(range(s, e+1))
+                if self.drag_mode == "GLOBAL_START":
+                    # 起点动，终点不动 (线性衰减)
+                    weights = 1 - x
+                elif self.drag_mode == "GLOBAL_END":
+                    # 起点不动，终点动 (线性增加)
+                    weights = x
                 
-                self.curves[self.selected_joint_idx].setData(self.backend_ref.df.iloc[:, col].values)
+                if self.drag_start_data is not None:
+                    new_values = self.drag_start_data + (delta_y * weights)
+                    self.backend_ref.df.iloc[:, col] = new_values
+                    self.backend_ref.modified_frames.update(range(0, total_len))
+            
+            else:
+                # 局部模式：只操作选区
+                r_min, r_max = self.region.getRegion()
+                s, e = int(r_min), int(r_max)
+                s = max(0, s); e = min(len(self.backend_ref.df)-1, e)
                 
-                curr_f = int(self.current_frame_line.value())
-                if s <= curr_f <= e: 
-                    self.backend_ref.set_frame(curr_f)
-                    if self.main_window_ref: self.main_window_ref.mujoco_widget.update()
+                if s < e and self.drag_start_data is not None:
+                    length = e - s + 1
+                    x = np.linspace(0, 1, length)
+                    
+                    if self.drag_mode == "LOCAL_CENTER":
+                        # 钟形曲线
+                        weights = (1 - np.cos(2 * np.pi * x)) / 2
+                    elif self.drag_mode == "LOCAL_LEFT":
+                        # 左动右不动
+                        weights = (1 + np.cos(np.pi * x)) / 2
+                    elif self.drag_mode == "LOCAL_RIGHT":
+                        # 右动左不动
+                        weights = (1 - np.cos(np.pi * x)) / 2
+                    else:
+                        weights = np.ones_like(x)
+
+                    new_values = self.drag_start_data + (delta_y * weights)
+                    self.backend_ref.df.iloc[s:e+1, col] = new_values
+                    self.backend_ref.modified_frames.update(range(s, e+1))
+
+            # 刷新曲线
+            self.curves[self.selected_joint_idx].setData(self.backend_ref.df.iloc[:, col].values)
+            
+            # 刷新机器人
+            curr_f = int(self.current_frame_line.value())
+            self.backend_ref.set_frame(curr_f)
+            if self.main_window_ref: self.main_window_ref.mujoco_widget.update()
         else:
             super().mouseMoveEvent(ev)
 
