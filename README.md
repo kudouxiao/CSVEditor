@@ -37,4 +37,4 @@ This tool bridges the gap between raw retargeted motion data and physical simula
 Install the required Python packages:
 
 ```bash
-pip install PyQt5 pyqtgraph mujoco pandas numpy scipy torch smplx qdarktheme
+pip install PyQt5 pyqtgraph mujoco pandas numpy scipy torch smplx pyqdarktheme
