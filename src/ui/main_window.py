@@ -4,10 +4,11 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLabel, QSplitter, QListWidget, 
                              QAbstractItemView, QFrame, QTabWidget, QScrollArea, 
                              QGroupBox, QCheckBox, QDoubleSpinBox, QComboBox, 
-                             QShortcut, QFileDialog, QMessageBox, QListWidgetItem)
+                             QShortcut, QFileDialog, QMessageBox, QListWidgetItem, QSpinBox)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QKeySequence
 from scipy.interpolate import PchipInterpolator
+from scipy.signal import savgol_filter
 
 # 导入模块
 from src.config import (DEFAULT_CSV_PATH, DEFAULT_MODEL_PATH, 
@@ -37,6 +38,7 @@ class MainWindow(QMainWindow):
         self.total_frames = 0
         self.is_playing = False
         self.init_ui()
+        self.updating_region_from_spin = False # 防止循环信号
         self.timer = QTimer()
         self.timer.timeout.connect(self.play_next_frame)
         
@@ -95,189 +97,228 @@ class MainWindow(QMainWindow):
             print("No reference motion loaded (SMPL/BVH not found).")
 
     def init_ui(self):
-        main_widget = QWidget()
-        self.setCentralWidget(main_widget)
+        main_widget = QWidget(); self.setCentralWidget(main_widget)
         layout = QVBoxLayout(main_widget)
         
+        # === Top Bar ===
         top_bar = QHBoxLayout()
-        self.btn_undo = QPushButton("[Undo]")
-        self.btn_undo.clicked.connect(self.perform_undo)
-        self.btn_redo = QPushButton("[Redo]")
-        self.btn_redo.clicked.connect(self.perform_redo)
-        btn_save = QPushButton("[Save As]")
-        btn_save.clicked.connect(self.save_as)
-        btn_load_smpl = QPushButton("[Load SMPL-X]")
-        btn_load_smpl.clicked.connect(self.load_smplx_ref)
-        btn_load_bvh = QPushButton("[Load BVH]")
-        btn_load_bvh.clicked.connect(self.load_bvh_ref)
+        self.btn_undo = QPushButton("↩ 撤销"); self.btn_undo.clicked.connect(self.perform_undo)
+        self.btn_redo = QPushButton("↪ 重做"); self.btn_redo.clicked.connect(self.perform_redo)
         
-        QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self.perform_undo)
-        QShortcut(QKeySequence("Ctrl+Y"), self).activated.connect(self.perform_redo)
-        QShortcut(QKeySequence(Qt.Key_Space), self).activated.connect(self.toggle_play)
+        # 新增: Ghost 开关
+        self.chk_ghost = QCheckBox("👻 显示原数据(Ghost)")
+        self.chk_ghost.stateChanged.connect(self.toggle_ghost)
         
-        top_bar.addWidget(self.btn_undo)
-        top_bar.addWidget(self.btn_redo)
-        top_bar.addSpacing(20)
-        top_bar.addWidget(btn_save)
-        top_bar.addWidget(btn_load_smpl)
-        top_bar.addWidget(btn_load_bvh) # 新增按钮
-        top_bar.addStretch()
+        btn_save = QPushButton("💾 另存为"); btn_save.clicked.connect(self.save_as)
+        btn_load_smpl = QPushButton("🕺 加载参考"); btn_load_smpl.clicked.connect(self.load_smplx_ref)
+        
+        top_bar.addWidget(self.btn_undo); top_bar.addWidget(self.btn_redo); top_bar.addSpacing(10)
+        top_bar.addWidget(self.chk_ghost); top_bar.addStretch()
+        top_bar.addWidget(btn_save); top_bar.addWidget(btn_load_smpl)
         layout.addLayout(top_bar)
         
-        splitter = QSplitter(Qt.Horizontal)
-        layout.addWidget(splitter)
+        splitter = QSplitter(Qt.Horizontal); layout.addWidget(splitter)
         
-        left_container = QWidget()
-        l_layout = QVBoxLayout(left_container)
-        l_layout.setContentsMargins(0,0,0,0)
+        # === Left ===
+        left_container = QWidget(); l_layout = QVBoxLayout(left_container); l_layout.setContentsMargins(0,0,0,0)
         self.mujoco_widget = MuJoCoWidget()
         l_layout.addWidget(self.mujoco_widget, stretch=4)
-        self.graph = CurveEditor()
-        self.graph.set_backend(self.backend, self)
+        self.graph = CurveEditor(); self.graph.set_backend(self.backend, self)
         l_layout.addWidget(self.graph, stretch=3)
+        # 播放控制
         play_ctrl = QHBoxLayout()
-        self.btn_prev = QPushButton("[<]")
-        self.btn_prev.clicked.connect(lambda: self.jump(-1))
-        self.btn_play = QPushButton("[Play/Space]")
-        self.btn_play.setStyleSheet("background-color: #44aa44; font-weight: bold; color: white;")
-        self.btn_play.clicked.connect(self.toggle_play)
-        self.btn_next = QPushButton("[>]")
-        self.btn_next.clicked.connect(lambda: self.jump(1))
-        self.lbl_frame = QLabel("0000")
-        self.lbl_frame.setFixedWidth(50)
-        self.lbl_frame.setStyleSheet("font-size: 14px; font-weight: bold; color: white;")
-        play_ctrl.addWidget(self.btn_prev)
-        play_ctrl.addWidget(self.btn_play)
-        play_ctrl.addWidget(self.btn_next)
-        play_ctrl.addSpacing(10)
-        play_ctrl.addWidget(self.lbl_frame)
+        self.btn_prev = QPushButton("◀"); self.btn_prev.clicked.connect(lambda: self.jump(-1))
+        self.btn_play = QPushButton("▶ 播放"); self.btn_play.clicked.connect(self.toggle_play)
+        self.btn_next = QPushButton("▶"); self.btn_next.clicked.connect(lambda: self.jump(1))
+        self.lbl_frame = QLabel("0000"); self.lbl_frame.setFixedWidth(50)
+        play_ctrl.addWidget(self.btn_prev); play_ctrl.addWidget(self.btn_play); play_ctrl.addWidget(self.btn_next); play_ctrl.addWidget(self.lbl_frame)
         l_layout.addLayout(play_ctrl)
         splitter.addWidget(left_container)
         
-        # Right (Tabs)
-        right_tabs = QTabWidget()
+        # === Right ===
+        right_container = QFrame(); right_container.setFrameShape(QFrame.StyledPanel); r_layout = QVBoxLayout(right_container)
         
-        # Tab 1: Edit
-        tab_edit = QWidget()
-        r_layout = QVBoxLayout(tab_edit)
-        r_layout.addWidget(QLabel("Channels List (Root + Joints)"))
-        self.joint_list = QListWidget()
-        self.joint_list.setSelectionMode(QAbstractItemView.SingleSelection)
-
-        for i, name in enumerate(self.backend.all_names): 
-            # 给 Root 通道加个颜色区分
+        # 1. 列表
+        r_layout.addWidget(QLabel("通道列表"))
+        self.joint_list = QListWidget(); self.joint_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        for i, name in enumerate(self.backend.all_names):
             item = QListWidgetItem(f"[{i:02d}] {name.replace('_joint','')}")
-            if i < 7: 
-                item.setForeground(Qt.cyan) # Root 设为青色
+            if i < 7: item.setForeground(Qt.cyan)
             self.joint_list.addItem(item)
-
         self.joint_list.itemSelectionChanged.connect(self.on_selection_change)
         r_layout.addWidget(self.joint_list)
-        tools_group = QGroupBox("Tools")
-        t_layout = QVBoxLayout()
-        btn_smooth = QPushButton("[Smooth Region]")
-        btn_smooth.clicked.connect(self.apply_smooth)
-        t_layout.addWidget(btn_smooth)
-        btn_add = QPushButton("[Additive Interpolation]")
-        btn_add.clicked.connect(self.apply_additive)
-        t_layout.addWidget(btn_add)
-        btn_reset = QPushButton("[Reset Region]")
-        btn_reset.clicked.connect(self.reset_original)
-        t_layout.addWidget(btn_reset)
-        tools_group.setLayout(t_layout)
-        r_layout.addWidget(tools_group)
-        right_tabs.addTab(tab_edit, "Edit")
-
-        # Tab 2: View & SMPL
-        tab_view = QWidget()
-        v_layout = QVBoxLayout(tab_view)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll_w = QWidget()
-        scroll_l = QVBoxLayout(scroll_w)
         
-        smpl_g = QGroupBox("Reference Motion Settings")
-        smpl_l = QVBoxLayout()
-        self.chk_smpl_vis = QCheckBox("Show Original Reference")
-        self.chk_smpl_vis.setChecked(True)
-        self.chk_smpl_vis.stateChanged.connect(
-            lambda s: setattr(self.mujoco_widget, 'show_ref', s==Qt.Checked) or self.mujoco_widget.update()
-        )
-        smpl_l.addWidget(self.chk_smpl_vis)
-
-        # 新增：帧率缩放控制
-        scale_l = QHBoxLayout()
-        scale_l.addWidget(QLabel("Frame Sync (Scale):"))
-        sp_scale = QDoubleSpinBox()
-        sp_scale.setRange(0.1, 10.0)
-        sp_scale.setSingleStep(0.1)
-        sp_scale.setValue(3.0)
-        sp_scale.valueChanged.connect(lambda v: setattr(self.mujoco_widget, 'smplx_frame_scale', v) or self.mujoco_widget.update())
-        scale_l.addWidget(sp_scale)
-        smpl_l.addLayout(scale_l)
-
+        # 2. 范围选择 (全局)
+        range_group = QGroupBox("编辑范围"); range_layout = QHBoxLayout()
+        self.spin_start = QSpinBox(); self.spin_start.setRange(0, 99999); self.spin_start.valueChanged.connect(self.on_spinbox_changed)
+        self.spin_end = QSpinBox(); self.spin_end.setRange(0, 99999); self.spin_end.valueChanged.connect(self.on_spinbox_changed)
+        range_layout.addWidget(QLabel("Start:")); range_layout.addWidget(self.spin_start)
+        range_layout.addWidget(QLabel("End:")); range_layout.addWidget(self.spin_end)
+        range_group.setLayout(range_layout); r_layout.addWidget(range_group)
         
-        off_l = QHBoxLayout()
-        off_l.addWidget(QLabel("X Offset:"))
-        sp_x = QDoubleSpinBox()
-        sp_x.setRange(-5, 5)
-        sp_x.setSingleStep(0.1)
-        sp_x.setValue(0.0)
-        sp_x.valueChanged.connect(lambda v: self.update_smpl_offset(0, v))
-        off_l.addWidget(sp_x)
-        off_l.addWidget(QLabel("Y Offset:"))
-        sp_y = QDoubleSpinBox()
-        sp_y.setRange(-5, 5)
-        sp_y.setSingleStep(0.1)
-        sp_y.setValue(1.0) # 默认错开
-        sp_y.valueChanged.connect(lambda v: self.update_smpl_offset(1, v))
-        off_l.addWidget(sp_y)
-        smpl_l.addLayout(off_l)
-        smpl_g.setLayout(smpl_l)
-        scroll_l.addWidget(smpl_g)
+        # 3. 功能 Tabs
+        self.tabs = QTabWidget()
         
-        # 1. Labels
-        g_lbl = QGroupBox("Display Labels")
-        l_g_l = QVBoxLayout()
-        combo_lbl = QComboBox()
-        for name in self.mujoco_widget.label_options.keys(): 
-            combo_lbl.addItem(name)
-        combo_lbl.currentTextChanged.connect(self.mujoco_widget.set_label_mode)
-        l_g_l.addWidget(combo_lbl)
-        g_lbl.setLayout(l_g_l)
-        scroll_l.addWidget(g_lbl)
-
-        # 2. Frames
-        g_frm = QGroupBox("Display Frames")
-        f_g_l = QVBoxLayout()
-        combo_frm = QComboBox()
-        for name in self.mujoco_widget.frame_options.keys(): 
-            combo_frm.addItem(name)
-        combo_frm.currentTextChanged.connect(self.mujoco_widget.set_frame_mode)
-        f_g_l.addWidget(combo_frm)
-        g_frm.setLayout(f_g_l)
-        scroll_l.addWidget(g_frm)
-
-        # 3. Render Flags
-        g_flags = QGroupBox("Render Flags")
-        fl_l = QVBoxLayout()
+        # --- Tab 1: Tools ---
+        tab_tools = QWidget(); tb_layout = QVBoxLayout(tab_tools)
+        
+        btn_linear = QPushButton("📏 直线连接 (Linear)"); btn_linear.clicked.connect(lambda: self.apply_connect("linear"))
+        btn_sigmoid = QPushButton("🌊 S形连接 (Sigmoid)"); btn_sigmoid.clicked.connect(lambda: self.apply_connect("sigmoid"))
+        btn_smooth = QPushButton("💧 SavGol 平滑"); btn_smooth.clicked.connect(self.apply_smooth_savgol)
+        btn_add = QPushButton("✨ 叠加插值 (Additive)"); btn_add.clicked.connect(self.apply_additive)
+        btn_reset = QPushButton("🔄 重置选中区域"); btn_reset.clicked.connect(self.reset_original)
+        
+        tb_layout.addWidget(btn_linear); tb_layout.addWidget(btn_sigmoid)
+        tb_layout.addSpacing(10)
+        tb_layout.addWidget(btn_smooth); tb_layout.addWidget(btn_add)
+        tb_layout.addStretch()
+        tb_layout.addWidget(btn_reset)
+        self.tabs.addTab(tab_tools, "🛠️ 工具")
+        
+        # --- Tab 2: Spline ---
+        tab_spline = QWidget(); ts_layout = QVBoxLayout(tab_spline)
+        h_anc = QHBoxLayout(); h_anc.addWidget(QLabel("锚点数:")); self.spin_anchor_count = QSpinBox(); self.spin_anchor_count.setRange(3, 50); self.spin_anchor_count.setValue(5); h_anc.addWidget(self.spin_anchor_count)
+        ts_layout.addLayout(h_anc)
+        
+        self.btn_spline_start = QPushButton("✏️ 开始编辑"); self.btn_spline_start.clicked.connect(self.toggle_spline_mode)
+        self.btn_spline_apply = QPushButton("✅ 应用"); self.btn_spline_apply.setEnabled(False); self.btn_spline_apply.clicked.connect(self.apply_spline)
+        self.btn_spline_cancel = QPushButton("❌ 取消"); self.btn_spline_cancel.setEnabled(False); self.btn_spline_cancel.clicked.connect(self.cancel_spline)
+        
+        ts_layout.addWidget(self.btn_spline_start)
+        ts_layout.addWidget(self.btn_spline_apply)
+        ts_layout.addWidget(self.btn_spline_cancel)
+        ts_layout.addStretch()
+        self.tabs.addTab(tab_spline, "✏️ 样条")
+        
+        # --- Tab 3: View (原有的) ---
+        tab_view = QWidget(); v_layout = QVBoxLayout(tab_view)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll_w = QWidget(); scroll_l = QVBoxLayout(scroll_w)
+        
+        # Ref Settings
+        smpl_g = QGroupBox("Reference Settings"); smpl_l = QVBoxLayout()
+        self.chk_ref_vis = QCheckBox("Show Reference"); self.chk_ref_vis.setChecked(True)
+        self.chk_ref_vis.stateChanged.connect(lambda s: setattr(self.mujoco_widget, 'show_ref', s==Qt.Checked) or self.mujoco_widget.update())
+        smpl_l.addWidget(self.chk_ref_vis)
+        
+        # Frame Scale
+        scale_l = QHBoxLayout(); scale_l.addWidget(QLabel("Scale:")); sp_scale = QDoubleSpinBox(); sp_scale.setRange(0.1, 10.0); sp_scale.setValue(1.0); sp_scale.valueChanged.connect(lambda v: setattr(self.mujoco_widget, 'smplx_frame_scale', v) or self.mujoco_widget.update()); scale_l.addWidget(sp_scale); smpl_l.addLayout(scale_l)
+        
+        # Offset
+        off_l = QHBoxLayout(); off_l.addWidget(QLabel("X:")); sp_x = QDoubleSpinBox(); sp_x.setRange(-5,5); sp_x.valueChanged.connect(lambda v: self.update_smpl_offset(0,v)); off_l.addWidget(sp_x)
+        off_l.addWidget(QLabel("Y:")); sp_y = QDoubleSpinBox(); sp_y.setRange(-5,5); sp_y.setValue(1.0); sp_y.valueChanged.connect(lambda v: self.update_smpl_offset(1,v)); off_l.addWidget(sp_y)
+        smpl_l.addLayout(off_l); smpl_g.setLayout(smpl_l); scroll_l.addWidget(smpl_g)
+        
+        # Flags
+        g_flags = QGroupBox("Render Flags"); fl_l = QVBoxLayout()
         for name, (flag, val, _) in self.mujoco_widget.render_flags.items():
-            cb = QCheckBox(name)
-            cb.setChecked(val)
+            cb = QCheckBox(name); cb.setChecked(val)
             cb.stateChanged.connect(lambda s, n=name: self.mujoco_widget.set_render_flag(n, s==Qt.Checked))
             fl_l.addWidget(cb)
-        g_flags.setLayout(fl_l)
-        scroll_l.addWidget(g_flags)
+        g_flags.setLayout(fl_l); scroll_l.addWidget(g_flags)
         
-        scroll_l.addStretch()
-        scroll.setWidget(scroll_w)
-        v_layout.addWidget(scroll)
-        right_tabs.addTab(tab_view, "View")
+        scroll.setWidget(scroll_w); v_layout.addWidget(scroll)
+        self.tabs.addTab(tab_view, "👀 视图")
         
-        splitter.addWidget(right_tabs)
-        splitter.setStretchFactor(0, 5)
-        splitter.setStretchFactor(1, 1)
+        r_layout.addWidget(self.tabs)
+        splitter.addWidget(right_container)
+        splitter.setStretchFactor(0, 5); splitter.setStretchFactor(1, 1)
         self.status_bar = self.statusBar()
+        
+        # Shortcuts
+        QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self.perform_undo)
+        QShortcut(QKeySequence("Ctrl+Y"), self).activated.connect(self.perform_redo)
+        QShortcut(QKeySequence(Qt.Key_Space), self).activated.connect(self.toggle_play)
+
+    # === Interaction Logic ===
+    def toggle_ghost(self, state):
+        self.graph.set_ghost_visible(state == Qt.Checked)
+
+    def on_region_changed(self):
+        if self.updating_region_from_spin: return
+        r_min, r_max = self.graph.region.getRegion()
+        s, e = int(r_min), int(r_max)
+        self.spin_start.setValue(s); self.spin_end.setValue(e)
+
+    def on_spinbox_changed(self):
+        s = self.spin_start.value(); e = self.spin_end.value()
+        if s > e: return 
+        self.updating_region_from_spin = True
+        self.graph.region.setRegion([s, e])
+        self.updating_region_from_spin = False
+
+    # --- Tool Functions ---
+    def apply_connect(self, mode):
+        if self.graph.selected_joint_idx is None: return
+        self.backend.snapshot()
+        s, e = self.spin_start.value(), self.spin_end.value()
+        col = self.graph.selected_joint_idx # 直接使用 idx
+        
+        if s >= e: return
+        val_start = self.backend.df.iloc[s, col]
+        val_end = self.backend.df.iloc[e, col]
+        count = e - s + 1
+        
+        if mode == "linear":
+            new_vals = np.linspace(val_start, val_end, count)
+        elif mode == "sigmoid":
+            t = np.linspace(0, 1, count)
+            w = (1 - np.cos(t * np.pi)) / 2
+            new_vals = val_start + (val_end - val_start) * w
+            
+        self.backend.df.iloc[s:e+1, col] = new_vals
+        self.backend.modified_frames.update(range(s, e+1))
+        self.refresh_ui(f"Applied {mode} connect")
+
+    def apply_smooth_savgol(self):
+        if self.graph.selected_joint_idx is None: return
+        self.backend.snapshot()
+        s, e = self.spin_start.value(), self.spin_end.value()
+        col = self.graph.selected_joint_idx
+        
+        data_chunk = self.backend.df.iloc[s:e+1, col].values
+        # Window size must be odd and <= length
+        window_len = min(len(data_chunk), 31)
+        if window_len % 2 == 0: window_len -= 1
+        
+        if window_len >= 3:
+            smoothed = savgol_filter(data_chunk, window_len, 3) # polyorder 3
+            self.backend.df.iloc[s:e+1, col] = smoothed
+            self.backend.modified_frames.update(range(s, e+1))
+            self.refresh_ui("Applied SavGol Smooth")
+
+    # --- Spline Functions ---
+    def toggle_spline_mode(self):
+        if self.graph.selected_joint_idx is None:
+            QMessageBox.warning(self, "提示", "请先选择通道")
+            return
+        
+        s = self.spin_start.value(); e = self.spin_end.value()
+        n = self.spin_anchor_count.value()
+        if e - s < n: return
+        
+        # Lock UI
+        self.btn_spline_start.setEnabled(False)
+        self.btn_spline_apply.setEnabled(True)
+        self.btn_spline_cancel.setEnabled(True)
+        self.tabs.setCurrentIndex(1) # Force switch tab
+        
+        self.graph.start_spline_mode(s, e, num_anchors=n)
+        self.status_bar.showMessage("Spline Mode Active")
+
+    def apply_spline(self):
+        self.graph.apply_spline_to_data()
+        self.reset_spline_ui()
+        self.status_bar.showMessage("Spline Applied")
+
+    def cancel_spline(self):
+        self.graph.cancel_spline_mode()
+        self.reset_spline_ui()
+        self.status_bar.showMessage("Spline Canceled")
+
+    def reset_spline_ui(self):
+        self.btn_spline_start.setEnabled(True)
+        self.btn_spline_apply.setEnabled(False)
+        self.btn_spline_cancel.setEnabled(False)
 
     def load_smplx_ref(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load SMPL-X (.npz)", "", "NPZ Files (*.npz)")
