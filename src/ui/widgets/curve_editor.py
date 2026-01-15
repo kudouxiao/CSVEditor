@@ -68,6 +68,9 @@ class CurveEditor(pg.PlotWidget):
         self.dragged_anchor_index = None
         self.spline_boundary_slopes = None
 
+        # === 新增：用于存储插入帧的高亮标记 ===
+        self.insertion_highlights = [] 
+
     def set_backend(self, backend, main_window):
         self.backend_ref = backend
         self.main_window_ref = main_window
@@ -78,6 +81,51 @@ class CurveEditor(pg.PlotWidget):
         self.show_ghost = visible
         if self.selected_joint_idx is not None:
             self.update_curves([self.selected_joint_idx])
+
+
+    # === 新增功能：添加高亮区域 ===
+    def add_highlight_region(self, start, end):
+        """在指定范围内添加绿色高亮，表示新插入的帧"""
+        # 创建一个绿色的半透明选区 (RGBA: 0, 255, 0, 50)
+        # movable=False 表示用户不能拖动它
+        highlight = pg.LinearRegionItem([start, end], brush=(0, 255, 0, 50), movable=False)
+        
+        # 移除边界线，让它看起来更像是一个背景色块
+        for line in highlight.lines:
+            line.setPen(pg.mkPen(None))
+            line.setHoverPen(pg.mkPen(None))
+            
+        highlight.setZValue(-10) # 放在最底层，不遮挡曲线
+        self.addItem(highlight)
+        self.insertion_highlights.append(highlight)
+
+    # === 新增功能：清除所有高亮 ===
+    def clear_highlights(self):
+        """清除所有高亮标记 (通常在撤销/重做或加载新文件时调用)"""
+        for item in self.insertion_highlights:
+            self.removeItem(item)
+        self.insertion_highlights.clear()
+
+    # === [新增] 修正选区范围函数 ===
+    def limit_region_to_range(self, total_frames):
+        """
+        当总帧数改变时，确保蓝色选区不越界
+        """
+        if total_frames <= 0: return
+
+        r_min, r_max = self.region.getRegion()
+        
+        # 1. 确保右边界不超过总帧数
+        if r_max >= total_frames:
+            r_max = total_frames - 1
+        
+        # 2. 确保左边界不超过右边界
+        if r_min >= r_max:
+            r_min = max(0, r_max - 10) # 保持至少10帧的宽度，或者0
+            
+        # 3. 应用修正
+        self.region.setRegion([r_min, r_max])
+
 
     def update_curves(self, selected_indices):
         for item in self.curves.values(): self.removeItem(item)
@@ -367,3 +415,5 @@ class CurveEditor(pg.PlotWidget):
             ev.accept()
         else:
             super().mouseReleaseEvent(ev)
+
+    

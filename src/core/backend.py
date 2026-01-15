@@ -191,6 +191,64 @@ class G1Backend(QObject):
                 col = 7 + c_idx
                 if col < len(line): self.data.qpos[m_idx] = line[col]
             mujoco.mj_forward(self.model, self.data)
+
+
+    def insert_frames(self, frame_idx, count=1):
+        """在指定帧索引之后插入 count 个当前帧的副本"""
+        if self.df is None: return False
+        
+        self.snapshot() # 1. 记录撤销栈
+        
+        # 2. 切分数据
+        # part1: 0 到 frame_idx (包含当前帧)
+        part1 = self.df.iloc[:frame_idx+1]
+        # part2: frame_idx+1 到 结束
+        part2 = self.df.iloc[frame_idx+1:]
+        
+        # 3. 构造插入块 (复制当前帧 count 次)
+        # 注意：使用 iloc[i:i+1] 保持 DataFrame 格式而不是 Series
+        frame_to_copy = self.df.iloc[frame_idx:frame_idx+1]
+        new_block = pd.concat([frame_to_copy] * count, ignore_index=True)
+        
+        # 4. 合并
+        self.df = pd.concat([part1, new_block, part2], ignore_index=True).reset_index(drop=True)
+        
+        part1 = self.df.iloc[:frame_idx+1]
+        part2 = self.df.iloc[frame_idx+1:]
+        frame_to_copy = self.df.iloc[frame_idx:frame_idx+1]
+        new_block = pd.concat([frame_to_copy] * count, ignore_index=True)
+        self.df = pd.concat([part1, new_block, part2], ignore_index=True).reset_index(drop=True)
+        
+        # === 修改：返回插入的范围 (开始帧, 结束帧) ===
+        # 插入是从 frame_idx + 1 开始的
+        inserted_start = frame_idx + 1
+        inserted_end = frame_idx + count
+        return (inserted_start, inserted_end)
+
+    def delete_frames(self, start_idx, count=1):
+        """删除从 start_idx 开始的 count 帧"""
+        if self.df is None or len(self.df) <= 1: return False
+        
+        self.snapshot()
+        
+        # 保护边界
+        actual_count = min(count, len(self.df) - start_idx)
+        if actual_count <= 0: return False
+        
+        # 删除逻辑：保留头部和尾部，丢弃中间
+        # part1: 0 到 start_idx-1
+        part1 = self.df.iloc[:start_idx]
+        # part2: start_idx + count 到 结束
+        part2 = self.df.iloc[start_idx + actual_count:]
+        
+        self.df = pd.concat([part1, part2], ignore_index=True).reset_index(drop=True)
+        
+        # 如果删空了，保留至少一帧
+        if len(self.df) == 0:
+            # 这种情况极少见，除非全选删除了，恢复一帧零姿态
+            self.df = pd.DataFrame(np.zeros((1, self.df_orig.shape[1])))
+            
+        return True
             
     def snapshot(self):
         if self.df is None: return

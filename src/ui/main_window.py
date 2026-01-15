@@ -162,6 +162,36 @@ class MainWindow(QMainWindow):
         btn_smooth = QPushButton("💧 SavGol 平滑"); btn_smooth.clicked.connect(self.apply_smooth_savgol)
         btn_add = QPushButton("✨ 叠加插值 (Additive)"); btn_add.clicked.connect(self.apply_additive)
         btn_reset = QPushButton("🔄 重置选中区域"); btn_reset.clicked.connect(self.reset_original)
+
+        # === 新增：帧操作组 ===
+        g_frame_ops = QGroupBox("帧操作 (改变时长)")
+        l_frame_ops = QVBoxLayout()
+        
+        # 插入控制
+        h_insert = QHBoxLayout()
+        h_insert.addWidget(QLabel("数量:"))
+        self.spin_frame_count = QSpinBox()
+        self.spin_frame_count.setRange(1, 1000)
+        self.spin_frame_count.setValue(10) # 默认插入10帧
+        h_insert.addWidget(self.spin_frame_count)
+        
+        btn_insert = QPushButton("➕ 插入帧 (Insert)")
+        btn_insert.setToolTip("在当前光标位置插入 N 帧当前姿态 (相当于暂停)")
+        btn_insert.clicked.connect(self.perform_frame_insert)
+        h_insert.addWidget(btn_insert)
+        
+        # 删除控制
+        btn_delete = QPushButton("➖ 删除选区 (Delete)")
+        btn_delete.setToolTip("删除蓝色选区内的所有帧")
+        btn_delete.clicked.connect(self.perform_frame_delete)
+        
+        l_frame_ops.addLayout(h_insert)
+        l_frame_ops.addWidget(btn_delete)
+        g_frame_ops.setLayout(l_frame_ops)
+        
+        # 布局添加
+        tb_layout.addWidget(g_frame_ops) # 放在最前面或合适位置
+        tb_layout.addWidget(btn_linear)
         
         tb_layout.addWidget(btn_linear); tb_layout.addWidget(btn_sigmoid)
         tb_layout.addSpacing(10)
@@ -353,6 +383,79 @@ class MainWindow(QMainWindow):
             else:
                 QMessageBox.warning(self, "Error", f"BVH Load Failed: {result}")
 
+    def perform_frame_insert(self):
+        """在当前红色播放线位置插入帧"""
+        count = self.spin_frame_count.value()
+        # 获取红色播放线当前所在的位置
+        current_idx = self.current_frame 
+        
+        # 调用后端，并获取插入范围
+        insert_range = self.backend.insert_frames(current_idx, count)
+        
+        if insert_range:
+            # 1. 刷新界面结构 (更新总帧数、滑块范围)
+            self.refresh_ui_structure(f"已在第 {current_idx} 帧处插入 {count} 帧 (绿色区域)")
+            
+            # 2. 在曲线图中添加绿色高亮
+            start, end = insert_range
+            self.graph.add_highlight_region(start, end)
+            
+            # 3. 将播放头移动到插入段的末尾，方便继续操作
+            self.update_frame(end)
+
+    def perform_frame_delete(self):
+        """删除当前选区内的帧"""
+        r_min, r_max = self.graph.region.getRegion()
+        s, e = int(r_min), int(r_max)
+        
+        if e - s + 1 >= self.backend.df.shape[0]:
+            QMessageBox.warning(self, "警告", "不能删除所有帧，至少保留一帧。")
+            return
+
+        reply = QMessageBox.question(self, '确认删除', 
+                                     f"确定要删除第 {s} 到 {e} 帧吗？",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            count = e - s + 1
+            if self.backend.delete_frames(s, count):
+                # === 修复点 1: 删除操作发生后，立即清除之前的绿色高亮 ===
+                # 因为帧数变了，旧的高亮位置已经没有意义了，保留会导致错位
+                self.graph.clear_highlights()
+                
+                self.refresh_ui_structure(f"已删除 {count} 帧")
+                
+                # 修正光标位置 (防止光标停留在已删除的区域)
+                new_idx = min(self.current_frame, self.backend.df.shape[0]-1)
+                self.update_frame(new_idx)
+
+    # === 修改刷新函数 (添加清除逻辑) ===
+    def refresh_ui_structure(self, status_msg):
+        """
+        当数据结构（总帧数）发生变化时调用此函数
+        """
+        self.total_frames = self.backend.df.shape[0]
+        
+        # 1. 更新 ViewBox 范围
+        self.graph.setXRange(0, self.total_frames)
+        
+        # === 修复点 2: 强制修正蓝色选区的位置，防止越界 ===
+        self.graph.limit_region_to_range(self.total_frames)
+        
+        # 3. 更新 SpinBox 范围
+        self.spin_start.setMaximum(self.total_frames - 1)
+        self.spin_end.setMaximum(self.total_frames - 1)
+        
+        # 4. 同步 SpinBox 数值 (因为 limit_region 可能会改变选区，需要反向同步给数字框)
+        r_min, r_max = self.graph.region.getRegion()
+        self.spin_start.setValue(int(r_min))
+        self.spin_end.setValue(int(r_max))
+        
+        # 5. 强制刷新曲线
+        if self.graph.selected_joint_idx is not None:
+            self.graph.update_curves([self.graph.selected_joint_idx])
+            
+        self.status_bar.showMessage(f"{status_msg} (总帧数: {self.total_frames})")
 
     def update_smpl_offset(self, axis, value):
         self.mujoco_widget.ref_offset[axis] = value
@@ -455,13 +558,34 @@ class MainWindow(QMainWindow):
         self.mujoco_widget.update()
         self.status_bar.showMessage("Reset")
 
+    # === 修改撤销/重做 (清除高亮) ===
     def perform_undo(self):
-        if self.backend.undo(): 
-            self.refresh_ui("Undone")
+        if self.backend.undo():
+            self.graph.clear_highlights()
+            self.refresh_ui_structure("已撤销")
             
+            # 获取当前数据的最大有效索引
+            max_idx = self.backend.df.shape[0] - 1
+            # 如果当前光标位置超过了最大帧数，强行拉回来
+            if self.current_frame > max_idx:
+                self.current_frame = max_idx
+            
+            # 使用 update_frame 而不是 backend.set_frame
+            # 这样可以同步更新滑块位置、数字显示和物理画面
+            self.update_frame(self.current_frame)
+            # === 修复结束 ===
+
     def perform_redo(self):
-        if self.backend.redo(): 
-            self.refresh_ui("Redone")
+        if self.backend.redo():
+            self.graph.clear_highlights()
+            self.refresh_ui_structure("已重做")
+            
+            # Redo 同理（比如重做了一个“删除帧”的操作，总帧数变少，也需要防越界）
+            max_idx = self.backend.df.shape[0] - 1
+            if self.current_frame > max_idx:
+                self.current_frame = max_idx
+                
+            self.update_frame(self.current_frame)
             
     def refresh_ui(self, msg):
         if self.graph.selected_joint_idx is not None: 
