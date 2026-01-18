@@ -5,6 +5,9 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QAbstractItemView, QFrame, QTabWidget, QScrollArea, 
                              QGroupBox, QCheckBox, QDoubleSpinBox, QComboBox, 
                              QShortcut, QFileDialog, QMessageBox, QListWidgetItem, QSpinBox,QApplication)
+                             # 引入媒体库
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+from PyQt5.QtCore import QUrl
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QKeySequence
 from scipy.interpolate import PchipInterpolator
@@ -12,10 +15,11 @@ from scipy.signal import savgol_filter
 
 # 导入模块
 from src.config import (DEFAULT_CSV_PATH, DEFAULT_MODEL_PATH, 
-                        DEFAULT_SMPLX_DATA_PATH, DEFAULT_BVH_PATH, SMPLX_BODY_MODEL_DIR, REF_LOAD_MODE)
+                        DEFAULT_SMPLX_DATA_PATH, DEFAULT_BVH_PATH, SMPLX_BODY_MODEL_DIR, REF_LOAD_MODE, ROBOT_FPS)
 from src.core.backend import G1Backend
 from src.ui.widgets.mujoco_widget import MuJoCoWidget
 from src.ui.widgets.curve_editor import CurveEditor
+from src.ui.widgets.audio_track import AudioTrack
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -91,6 +95,11 @@ class MainWindow(QMainWindow):
             elif try_load_bvh():
                 self.status_bar.showMessage("Loaded Robot & BVH Ref (Auto)")
 
+        # === 新增：音频播放器 ===
+        self.media_player = QMediaPlayer() # 播放器
+        self.media_player.setVolume(100) # 设置音量
+        self.media_player.error.connect(lambda: print(f"Media Error: {self.media_player.errorString()}"))
+
     def init_ui(self):
         main_widget = QWidget(); self.setCentralWidget(main_widget)
         layout = QVBoxLayout(main_widget)
@@ -106,6 +115,11 @@ class MainWindow(QMainWindow):
         
         btn_save = QPushButton("💾 另存为")
         btn_save.clicked.connect(self.save_as)
+
+        # 增加一个加载音频的按钮
+        btn_audio = QPushButton("🎵 加载音乐")
+        btn_audio.clicked.connect(self.load_audio)
+        top_bar.addWidget(btn_audio)
         
         top_bar.addWidget(self.btn_undo); top_bar.addWidget(self.btn_redo); top_bar.addSpacing(10)
         top_bar.addWidget(self.chk_ghost); top_bar.addStretch()
@@ -118,8 +132,20 @@ class MainWindow(QMainWindow):
         left_container = QWidget(); l_layout = QVBoxLayout(left_container); l_layout.setContentsMargins(0,0,0,0)
         self.mujoco_widget = MuJoCoWidget()
         l_layout.addWidget(self.mujoco_widget, stretch=4)
-        self.graph = CurveEditor(); self.graph.set_backend(self.backend, self)
+
+        self.graph = CurveEditor()
+        self.graph.set_backend(self.backend, self)
         l_layout.addWidget(self.graph, stretch=3)
+
+        # 3. Audio Track (Bottom) - 新增
+        self.audio_track = AudioTrack()
+        self.audio_track.set_backend(self.backend)
+        self.audio_track.setXLink(self.graph) # 保持 X 轴同步缩放
+        
+        # 【关键】连接音轨红线拖动信号 -> 更新整个界面
+        self.audio_track.frame_changed.connect(self.update_frame_from_graph)
+        l_layout.addWidget(self.audio_track, stretch=1)
+
         # 播放控制
         play_ctrl = QHBoxLayout()
         self.btn_prev = QPushButton("◀"); self.btn_prev.clicked.connect(lambda: self.jump(-1))
@@ -461,25 +487,25 @@ class MainWindow(QMainWindow):
         self.mujoco_widget.ref_offset[axis] = value
         self.mujoco_widget.update()
 
-    def toggle_play(self):
-        if self.total_frames == 0: 
-            return
-        if self.is_playing: 
-            self.timer.stop()
-            self.is_playing = False
-            self.btn_play.setText("[Play/Space]")
-            self.btn_play.setStyleSheet("background-color: #44aa44; font-weight: bold; color: white;")
-        else: 
-            self.timer.start(33)
-            self.is_playing = True
-            self.btn_play.setText("[Pause/Space]")
-            self.btn_play.setStyleSheet("background-color: #aa4444; font-weight: bold; color: white;")
+    # def toggle_play(self):
+    #     if self.total_frames == 0: 
+    #         return
+    #     if self.is_playing: 
+    #         self.timer.stop()
+    #         self.is_playing = False
+    #         self.btn_play.setText("[Play/Space]")
+    #         self.btn_play.setStyleSheet("background-color: #44aa44; font-weight: bold; color: white;")
+    #     else: 
+    #         self.timer.start(33)
+    #         self.is_playing = True
+    #         self.btn_play.setText("[Pause/Space]")
+    #         self.btn_play.setStyleSheet("background-color: #aa4444; font-weight: bold; color: white;")
 
-    def play_next_frame(self):
-        next_idx = self.current_frame + 1
-        if next_idx >= self.total_frames: 
-            next_idx = 0
-        self.update_frame(next_idx)
+    # def play_next_frame(self):
+    #     next_idx = self.current_frame + 1
+    #     if next_idx >= self.total_frames: 
+    #         next_idx = 0
+    #     self.update_frame(next_idx)
 
     def on_selection_change(self):
         items = self.joint_list.selectedIndexes()
@@ -491,18 +517,49 @@ class MainWindow(QMainWindow):
     def update_frame(self, idx):
         self.current_frame = idx
         self.lbl_frame.setText(f"{idx:04d}")
+        
+        # 1. 更新上方曲线图的红线
+        # blockSignals 防止循环调用 (虽然 setValue 通常不触发 dragged，但保险起见)
+        self.graph.current_frame_line.blockSignals(True)
         self.graph.current_frame_line.setValue(idx)
-        self.mujoco_widget.current_frame_idx = idx # 同步帧号给渲染器
+        self.graph.current_frame_line.blockSignals(False)
+        
+        # 2. 更新下方音轨的红线
+        self.audio_track.current_line.blockSignals(True)
+        self.audio_track.current_line.setValue(idx)
+        self.audio_track.current_line.blockSignals(False)
+        
+        # 3. 更新后端和画面
         self.backend.set_frame(idx)
         self.mujoco_widget.update() 
+
+    # def update_frame_from_graph(self, idx):
+    #     idx = max(0, min(self.total_frames-1, idx))
+    #     self.current_frame = idx
+    #     self.lbl_frame.setText(f"{idx:04d}")
+    #     self.mujoco_widget.current_frame_idx = idx
+    #     self.backend.set_frame(idx)
+    #     self.mujoco_widget.update()
 
     def update_frame_from_graph(self, idx):
         idx = max(0, min(self.total_frames-1, idx))
         self.current_frame = idx
         self.lbl_frame.setText(f"{idx:04d}")
-        self.mujoco_widget.current_frame_idx = idx
         self.backend.set_frame(idx)
         self.mujoco_widget.update()
+        
+        # === 新增：拖动时同步声音 (可选) ===
+        # 如果你想拖动时听到“滋滋”的声音可以加，但通常建议拖动时不播放，只定位
+        # 但我们需要更新播放器的内部指针，这样下次按播放时能接上
+        fps = 30.0
+        time_ms = int((idx / fps) * 1000)
+        if self.media_player.mediaStatus() != QMediaPlayer.NoMedia:
+             # 如果正在播放，拖动不应该打断播放逻辑，或者应该暂停播放
+             # 这里不做操作，只有在 toggle_play 里的 start 才会用到 setPosition
+             pass
+
+    def handle_media_error(self):
+        print(f"Media Player Error: {self.media_player.errorString()}")
 
     def jump(self, delta):
         new = max(0, min(self.total_frames-1, self.current_frame + delta))
@@ -599,3 +656,65 @@ class MainWindow(QMainWindow):
         if path: 
             self.backend.df.to_csv(path, index=False, header=False)
             QMessageBox.information(self, "Save", "Saved successfully")
+
+    # === 新增：加载音频槽函数 ===
+    def load_audio(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load Audio", "", "Audio (*.mp3 *.wav)")
+        if path:
+            if self.backend.load_audio_data(path):
+                self.audio_track.update_waveform() # 刷新音轨显示
+                
+                # 设置播放器源
+                url = QUrl.fromLocalFile(path)
+                self.media_player.setMedia(QMediaContent(url))
+                self.status_bar.showMessage(f"Audio Loaded: {os.path.basename(path)}")
+
+    # === 修改：播放逻辑 (核心同步) ===
+    def toggle_play(self):
+        if self.total_frames == 0: return
+        
+        if self.is_playing:
+            self.timer.stop(); self.is_playing = False; self.media_player.pause()
+            self.btn_play.setText("▶ 播放 (Space)")
+        else:
+            # 计算开始播放的位置
+            # 机器人当前帧 -> 对应音频的时间点
+            audio_start_time = self.backend.get_audio_time_from_frame(self.current_frame, ROBOT_FPS)
+            
+            # QMediaPlayer 使用毫秒
+            start_ms = int(audio_start_time * 1000)
+            
+            if self.backend.audio_path:
+                if start_ms < 0: 
+                    # 音乐还没开始 (偏移导致)，延迟播放
+                    self.media_player.stop()
+                    # 这里可以做一个单次定时器在未来某个时刻 start，简化起见先 stop
+                else:
+                    self.media_player.setPosition(start_ms)
+                    self.media_player.play()
+            
+            self.timer.start(33); self.is_playing = True
+            self.btn_play.setText("⏸ 暂停 (Space)")
+
+
+    def play_next_frame(self):
+        # 这里的逻辑是：以 UI 帧数为准，还是以音乐时间为准？
+        # 为了保证音画同步，通常以【音乐时间】为基准校准帧数
+        
+        if self.media_player.state() == QMediaPlayer.PlayingState:
+            # 获取播放器当前时间 (s)
+            current_audio_time = self.media_player.position() / 1000.0
+            # 反推机器人应该在哪一帧：Frame = (AudioTime + Offset) * FPS
+            target_frame = int((current_audio_time + self.backend.audio_offset) * ROBOT_FPS)
+            
+            # 简单的防跳变保护
+            if target_frame > self.current_frame:
+                next_idx = target_frame
+            else:
+                next_idx = self.current_frame + 1
+        else:
+            # 无音乐或音乐还没开始时的普通播放
+            next_idx = self.current_frame + 1
+
+        if next_idx >= self.total_frames: next_idx = 0
+        self.update_frame(next_idx)

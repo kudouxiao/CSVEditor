@@ -2,7 +2,7 @@ import numpy as np
 import mujoco
 
 # ============ 默认路径 ============
-DEFAULT_CSV_PATH = "/home/jq/project/CSVEditor/retargeted/left91gai.csv"
+DEFAULT_CSV_PATH = "/home/jq/project/CSVEditor/retargeted/right31.csv"
 DEFAULT_MODEL_PATH = "/home/jq/project/CSVEditor/assets/unitree_g1/g1_mocap_29dof.xml"
 
 # SMPL-X 配置
@@ -14,6 +14,8 @@ DEFAULT_BVH_PATH = "/home/jq/project/CSVEditor/bvh/left71_cut-zuo.bvh"
 
 # 可选值: "SMPL", "BVH", "AUTO" (AUTO = 优先SMPL，没有则找BVH)
 REF_LOAD_MODE = "BVH"
+
+ROBOT_FPS = 30
 
 # ============ 关节定义 ============
 CSV_JOINT_NAMES = [

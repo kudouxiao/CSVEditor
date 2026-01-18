@@ -6,6 +6,7 @@ import torch
 import smplx
 import mujoco
 from PyQt5.QtCore import QObject, pyqtSignal
+import librosa # 引入音频库
 
 # 导入配置
 from src.config import CSV_JOINT_NAMES
@@ -23,6 +24,13 @@ class G1Backend(QObject):
         self.ref_parents = None  # List[int]
         self.ref_type = "none"   # "smplx" or "bvh"
 
+        # 音频数据
+        self.audio_path = None
+        self.audio_data = None # 原始音频数据 (numpy array)
+        self.audio_sr = 22050  # 采样率
+        self.audio_offset = 0.0 # 音频相对于动作的偏移 (秒) - 负数表示音乐延迟播放
+        self.duration = 0.0
+
         self.lock = threading.Lock()
         self.joint_mapping = {}
         self.joint_id_mapping = {}  # [新增] CSV Index -> Joint ID (用于查限位)
@@ -39,6 +47,31 @@ class G1Backend(QObject):
         self.csv_joint_names = CSV_JOINT_NAMES
 
         self.all_names = self.root_names + self.csv_joint_names
+
+
+    def load_audio_data(self, file_path):
+        try:
+            print(f"[INFO] Loading Audio: {file_path}")
+            # 加载原始音频
+            y, sr = librosa.load(file_path, sr=None) # sr=None 保持原始采样率
+            
+            self.audio_data = y
+            self.audio_sr = sr
+            self.audio_path = file_path
+            self.duration = librosa.get_duration(y=y, sr=sr)
+            self.audio_offset = 0.0 # 重置偏移
+            
+            return True
+        except Exception as e:
+            print(f"Audio Error: {e}")
+            return False
+            
+    # 计算当前帧对应的音频时间戳 (考虑偏移)
+    def get_audio_time_from_frame(self, frame_idx, fps=30.0):
+        # 动作时间 = frame / fps
+        # 音频应该播放的时间 = 动作时间 - 偏移量
+        return (frame_idx / fps) - self.audio_offset
+
 
     def load_data(self, csv_path, model_path):
         try:

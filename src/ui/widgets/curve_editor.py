@@ -2,18 +2,51 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt
 from scipy.interpolate import CubicSpline
+from src.config import ROBOT_FPS # 引入帧率用于计算时间
+
+# === 新增：自定义坐标轴类 ===
+class TimeAxisItem(pg.AxisItem):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def tickStrings(self, values, scale, spacing):
+        """
+        重写此方法以自定义刻度文本
+        values: 坐标轴上的数值 (即帧索引)
+        """
+        strings = []
+        for v in values:
+            # 计算时间
+            time_sec = v / ROBOT_FPS
+            # 格式化: 帧数\n时间
+            # 例如: 30\n1.00s
+            strings.append(f"{int(v)}\n{time_sec:.2f}s")
+        return strings
+
 
 class CurveEditor(pg.PlotWidget):
     """
     CurveEditor v3.2: 全局端点修正 + 局部软选择
     """
     def __init__(self, parent=None):
-        super().__init__(parent)
+        time_axis = TimeAxisItem(orientation='bottom')
+        # 2. 传递给父类构造函数 (axisItems={'bottom': axis})
+        super().__init__(parent, axisItems={'bottom': time_axis})
+
+
         self.setBackground('#1e1e1e')
         self.showGrid(x=True, y=True, alpha=0.3)
         self.setMouseEnabled(x=True, y=False)
-        self.getPlotItem().setLabel('bottom', 'Frame Index')
+
+        # 修改 Label，提示单位
+        self.getPlotItem().setLabel('bottom', 'Frame (Time)')
         self.getPlotItem().setLabel('left', 'Value')
+
+        # === 新增：音频波形曲线 (Layer -10, 最底层) ===
+        # 使用填充模式，看起来更像音频软件
+        self.audio_curve = self.plot([], pen=pg.mkPen(None), brush=pg.mkBrush(30, 144, 255, 30)) # 浅蓝色半透明填充
+        self.audio_curve.setZValue(-100) # 放到最最底下
+        self.audio_curve.setFillLevel(0) # 填充到 0 线
         
         # 1. 选区 (Layer 10)
         self.region = pg.LinearRegionItem([0, 100], brush=(50, 50, 200, 50))
@@ -68,8 +101,13 @@ class CurveEditor(pg.PlotWidget):
         self.dragged_anchor_index = None
         self.spline_boundary_slopes = None
 
-        # === 新增：用于存储插入帧的高亮标记 ===
-        self.insertion_highlights = [] 
+        # 新增高亮列表
+        self.insertion_highlights = []
+        
+        # 新增音频曲线
+        self.audio_curve = self.plot([], pen=pg.mkPen(None), brush=pg.mkBrush(30, 144, 255, 30))
+        self.audio_curve.setZValue(-100); self.audio_curve.setFillLevel(0)
+
 
     def set_backend(self, backend, main_window):
         self.backend_ref = backend
@@ -253,15 +291,24 @@ class CurveEditor(pg.PlotWidget):
     # === Interaction Logic (核心修改部分) ===
     def mousePressEvent(self, ev):
         # 1. 样条模式点击
-        if self.spline_mode_active and ev.button() == Qt.LeftButton:
-            pos = self.plotItem.vb.mapSceneToView(ev.pos())
-            x_tol = (self.viewRange()[0][1] - self.viewRange()[0][0]) * 0.02
-            y_tol = (self.viewRange()[1][1] - self.viewRange()[1][0]) * 0.05
-            for i, (ax, ay) in enumerate(zip(self.spline_anchors_x, self.spline_anchors_y)):
-                if abs(ax - pos.x()) < x_tol and abs(ay - pos.y()) < y_tol:
-                    self.dragged_anchor_index = i
-                    ev.accept()
-                    return
+        if self.spline_mode_active:
+            if ev.button() == Qt.LeftButton:
+                pos = self.plotItem.vb.mapSceneToView(ev.pos())
+                # 增大容差，方便点击 (4% 宽度, 10% 高度)
+                x_tol = (self.viewRange()[0][1] - self.viewRange()[0][0]) * 0.04
+                y_tol = (self.viewRange()[1][1] - self.viewRange()[1][0]) * 0.1
+                for i, (ax, ay) in enumerate(zip(self.spline_anchors_x, self.spline_anchors_y)):
+                    if abs(ax - pos.x()) < x_tol and abs(ay - pos.y()) < y_tol:
+                        self.dragged_anchor_index = i
+                        ev.accept()
+                        return
+                # 即使没点中锚点，也拦截左键，防止触发 pyqtgraph 的默认平移 (导致用户感觉“整条曲线被拖动”)
+                ev.accept()
+                return
+            elif ev.button() == Qt.MidButton:
+                # 样条模式下拦截中键，防止视图乱动
+                ev.accept()
+                return
         
         # 2. 软拖拽模式 (Ctrl+Click)
         if not self.spline_mode_active and (ev.modifiers() & Qt.ControlModifier) and self.selected_joint_idx is not None and ev.button() == Qt.LeftButton:
@@ -282,27 +329,9 @@ class CurveEditor(pg.PlotWidget):
             total_len = len(self.backend_ref.df)
             col = self.selected_joint_idx
             
-            # === 判断全局/局部模式 ===
-            # 判定阈值：总长度的 5%
-            global_threshold = total_len * 0.05
-            
-            if click_x < global_threshold:
-                # 点击了整段曲线的开头 -> 全局左端点调节
-                self.drag_mode = "GLOBAL_START"
-                if self.main_window_ref: self.main_window_ref.status_bar.showMessage("模式: 全局起点调节 (终点固定)")
-                # 备份整列数据
-                self.drag_start_data = self.backend_ref.df.iloc[:, col].values.copy()
-                
-            elif click_x > (total_len - global_threshold):
-                # 点击了整段曲线的结尾 -> 全局右端点调节
-                self.drag_mode = "GLOBAL_END"
-                if self.main_window_ref: self.main_window_ref.status_bar.showMessage("模式: 全局终点调节 (起点固定)")
-                # 备份整列数据
-                self.drag_start_data = self.backend_ref.df.iloc[:, col].values.copy()
-                
-            else:
-                # 局部选区模式 (原有逻辑)
-                # 进一步细分局部模式
+            # === [修改] 优先级调整：先判断是否在选区(Region)内 ===
+            if r_min <= click_x <= r_max:
+                # 模式：局部选区模式
                 s_local = max(0, s_local); e_local = min(total_len-1, e_local)
                 region_len = e_local - s_local
                 
@@ -321,6 +350,22 @@ class CurveEditor(pg.PlotWidget):
                     else:
                         self.drag_mode = "LOCAL_CENTER"
                         if self.main_window_ref: self.main_window_ref.status_bar.showMessage("模式: 局部整体调节")
+            else:
+                # 不在选区内，再判断是否点击了整段曲线的开头/结尾 (全局模式)
+                global_threshold = total_len * 0.05
+                if click_x < global_threshold:
+                    self.drag_mode = "GLOBAL_START"
+                    if self.main_window_ref: self.main_window_ref.status_bar.showMessage("模式: 全局起点调节 (终点固定)")
+                    self.drag_start_data = self.backend_ref.df.iloc[:, col].values.copy()
+                elif click_x > (total_len - global_threshold):
+                    self.drag_mode = "GLOBAL_END"
+                    if self.main_window_ref: self.main_window_ref.status_bar.showMessage("模式: 全局终点调节 (起点固定)")
+                    self.drag_start_data = self.backend_ref.df.iloc[:, col].values.copy()
+                else:
+                    # 即使都不在，也不执行操作，防止误触
+                    self.is_editing = False
+                    ev.ignore()
+                    return
             
             self.region.setMovable(False)
         else:
@@ -333,9 +378,11 @@ class CurveEditor(pg.PlotWidget):
         pos = self.plotItem.vb.mapSceneToView(scene_point)
         
         # Spline Drag
-        if self.spline_mode_active and self.dragged_anchor_index is not None:
-            self.spline_anchors_y[self.dragged_anchor_index] = pos.y()
-            self.update_spline_visuals()
+        if self.spline_mode_active:
+            if self.dragged_anchor_index is not None:
+                self.spline_anchors_y[self.dragged_anchor_index] = pos.y()
+                self.update_spline_visuals()
+            # 样条模式下拦截所有移动事件，防止默认的视图平移/缩放
             ev.accept()
             return
 
@@ -407,7 +454,7 @@ class CurveEditor(pg.PlotWidget):
     def mouseReleaseEvent(self, ev):
         if self.spline_mode_active:
             self.dragged_anchor_index = None
-            ev.accept()
+            ev.accept() # 总是拦截，防止干扰视图
         elif self.is_editing:
             self.is_editing = False
             self.drag_start_data = None
@@ -415,5 +462,16 @@ class CurveEditor(pg.PlotWidget):
             ev.accept()
         else:
             super().mouseReleaseEvent(ev)
+
+    def update_audio_visuals(self):
+        """当后端加载音频后调用"""
+        if self.backend_ref and self.backend_ref.audio_waveform is not None:
+            # 绘制波形
+            self.audio_curve.setData(
+                self.backend_ref.audio_frames, 
+                self.backend_ref.audio_waveform
+            )
+        else:
+            self.audio_curve.setData([], [])
 
     
