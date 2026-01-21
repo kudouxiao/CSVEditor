@@ -3,8 +3,6 @@ __pycache__/
 src/config.py
 
 # 忽略你的特定大文件夹/无关文件夹
-smplx/
-bvh/
-assets/
-retargeted/
+assets/body_models/smplx/
+old_version/
 
