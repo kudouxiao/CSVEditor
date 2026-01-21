@@ -1,4 +1,10 @@
 __pycache__/
-__pycache__/
 *.pyc
 src/config.py
+
+# 忽略你的特定大文件夹/无关文件夹
+smplx/
+bvh/
+assets/
+retargeted/
+
