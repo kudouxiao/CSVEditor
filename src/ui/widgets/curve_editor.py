@@ -292,23 +292,38 @@ class CurveEditor(pg.PlotWidget):
     def mousePressEvent(self, ev):
         # 1. 样条模式点击
         if self.spline_mode_active:
+            pos = self.plotItem.vb.mapSceneToView(ev.pos())
+            
             if ev.button() == Qt.LeftButton:
-                pos = self.plotItem.vb.mapSceneToView(ev.pos())
-                # 增大容差，方便点击 (4% 宽度, 10% 高度)
-                x_tol = (self.viewRange()[0][1] - self.viewRange()[0][0]) * 0.04
-                y_tol = (self.viewRange()[1][1] - self.viewRange()[1][0]) * 0.1
+                # 优化选点算法：计算归一化距离，寻找最近点
+                view_range_x = self.viewRange()[0][1] - self.viewRange()[0][0]
+                view_range_y = self.viewRange()[1][1] - self.viewRange()[1][0]
+                
+                best_idx = -1
+                min_dist_sq = float('inf')
+                # 设定感应阈值 (屏幕空间的 2% 左右)
+                threshold_sq = (0.03 ** 2) 
+                
                 for i, (ax, ay) in enumerate(zip(self.spline_anchors_x, self.spline_anchors_y)):
-                    if abs(ax - pos.x()) < x_tol and abs(ay - pos.y()) < y_tol:
-                        self.dragged_anchor_index = i
-                        ev.accept()
-                        return
-                # 即使没点中锚点，也拦截左键，防止触发 pyqtgraph 的默认平移 (导致用户感觉“整条曲线被拖动”)
-                ev.accept()
-                return
+                    # 归一化坐标差异，使得 X 和 Y 方向的感应区域在视觉上更均衡
+                    dx = (ax - pos.x()) / view_range_x
+                    dy = (ay - pos.y()) / view_range_y
+                    dist_sq = dx*dx + dy*dy
+                    
+                    if dist_sq < threshold_sq and dist_sq < min_dist_sq:
+                        min_dist_sq = dist_sq
+                        best_idx = i
+                
+                if best_idx != -1:
+                    self.dragged_anchor_index = best_idx
+                    ev.accept()
+                    return
+                
+                # 如果没点中锚点，不拦截，交给父类处理（允许平移视图）
+            
             elif ev.button() == Qt.MidButton:
-                # 样条模式下拦截中键，防止视图乱动
-                ev.accept()
-                return
+                # 中键通常用于平移，交给父类处理
+                pass
         
         # 2. 软拖拽模式 (Ctrl+Click)
         if not self.spline_mode_active and (ev.modifiers() & Qt.ControlModifier) and self.selected_joint_idx is not None and ev.button() == Qt.LeftButton:
@@ -382,10 +397,10 @@ class CurveEditor(pg.PlotWidget):
             if self.dragged_anchor_index is not None:
                 self.spline_anchors_y[self.dragged_anchor_index] = pos.y()
                 self.update_spline_visuals()
-            # 样条模式下拦截所有移动事件，防止默认的视图平移/缩放
-            ev.accept()
-            return
-
+                ev.accept()
+                return
+            # 样条模式下如果不正在拖动锚点，不要拦截事件，允许视图平移
+        
         # Soft Drag
         if self.is_editing:
             if not (ev.buttons() & Qt.LeftButton): # 安全检查
@@ -453,8 +468,10 @@ class CurveEditor(pg.PlotWidget):
 
     def mouseReleaseEvent(self, ev):
         if self.spline_mode_active:
-            self.dragged_anchor_index = None
-            ev.accept() # 总是拦截，防止干扰视图
+            if self.dragged_anchor_index is not None:
+                self.dragged_anchor_index = None
+                ev.accept()
+                return
         elif self.is_editing:
             self.is_editing = False
             self.drag_start_data = None

@@ -109,21 +109,20 @@ class MainWindow(QMainWindow):
         self.btn_undo = QPushButton("↩ 撤销"); self.btn_undo.clicked.connect(self.perform_undo)
         self.btn_redo = QPushButton("↪ 重做"); self.btn_redo.clicked.connect(self.perform_redo)
         
-        # 新增: Ghost 开关
         self.chk_ghost = QCheckBox("👻 显示原数据(Ghost)")
         self.chk_ghost.stateChanged.connect(self.toggle_ghost)
         
-        btn_save = QPushButton("💾 另存为")
-        btn_save.clicked.connect(self.save_as)
-
-        # 增加一个加载音频的按钮
-        btn_audio = QPushButton("🎵 加载音乐")
-        btn_audio.clicked.connect(self.load_audio)
-        top_bar.addWidget(btn_audio)
+        btn_save = QPushButton("💾 另存为"); btn_save.clicked.connect(self.save_as)
         
+        # 增加一个加载音频的按钮
+        btn_audio = QPushButton("🎵 加载音乐"); btn_audio.clicked.connect(self.load_audio)
+        
+        btn_load_smpl = QPushButton("🕺 加载参考"); btn_load_smpl.clicked.connect(self.load_smplx_ref)
+
         top_bar.addWidget(self.btn_undo); top_bar.addWidget(self.btn_redo); top_bar.addSpacing(10)
-        top_bar.addWidget(self.chk_ghost); top_bar.addStretch()
-        top_bar.addWidget(btn_save)
+        top_bar.addWidget(self.chk_ghost); top_bar.addSpacing(10)
+        top_bar.addWidget(btn_audio); top_bar.addStretch()
+        top_bar.addWidget(btn_save); top_bar.addWidget(btn_load_smpl)
         layout.addLayout(top_bar)
         
         splitter = QSplitter(Qt.Horizontal); layout.addWidget(splitter)
@@ -137,14 +136,12 @@ class MainWindow(QMainWindow):
         self.graph.set_backend(self.backend, self)
         l_layout.addWidget(self.graph, stretch=3)
 
-        # 3. Audio Track (Bottom) - 新增
+        # 3. Audio Track (Bottom)
         self.audio_track = AudioTrack()
         self.audio_track.set_backend(self.backend)
         self.audio_track.setXLink(self.graph) # 保持 X 轴同步缩放
-        
-        # 【关键】连接音轨红线拖动信号 -> 更新整个界面
         self.audio_track.frame_changed.connect(self.update_frame_from_graph)
-        l_layout.addWidget(self.audio_track, stretch=1)
+        l_layout.addWidget(self.audio_track, stretch=0) # stretch=0 固定高度
 
         # 播放控制
         play_ctrl = QHBoxLayout()
@@ -183,47 +180,50 @@ class MainWindow(QMainWindow):
         # --- Tab 1: Tools ---
         tab_tools = QWidget(); tb_layout = QVBoxLayout(tab_tools)
         
-        btn_linear = QPushButton("📏 直线连接 (Linear)"); btn_linear.clicked.connect(lambda: self.apply_connect("linear"))
-        btn_sigmoid = QPushButton("🌊 S形连接 (Sigmoid)"); btn_sigmoid.clicked.connect(lambda: self.apply_connect("sigmoid"))
-        btn_smooth = QPushButton("💧 SavGol 平滑"); btn_smooth.clicked.connect(self.apply_smooth_savgol)
-        btn_add = QPushButton("✨ 叠加插值 (Additive)"); btn_add.clicked.connect(self.apply_additive)
-        btn_reset = QPushButton("🔄 重置选中区域"); btn_reset.clicked.connect(self.reset_original)
-
-        # === 新增：帧操作组 ===
-        g_frame_ops = QGroupBox("帧操作 (改变时长)")
+        # A. 帧操作组 (新增)
+        g_frame_ops = QGroupBox("帧操作 (Timeline)")
         l_frame_ops = QVBoxLayout()
         
-        # 插入控制
         h_insert = QHBoxLayout()
         h_insert.addWidget(QLabel("数量:"))
-        self.spin_frame_count = QSpinBox()
-        self.spin_frame_count.setRange(1, 1000)
-        self.spin_frame_count.setValue(10) # 默认插入10帧
+        self.spin_frame_count = QSpinBox(); self.spin_frame_count.setRange(1, 1000); self.spin_frame_count.setValue(10)
         h_insert.addWidget(self.spin_frame_count)
-        
         btn_insert = QPushButton("➕ 插入帧 (Insert)")
-        btn_insert.setToolTip("在当前光标位置插入 N 帧当前姿态 (相当于暂停)")
+        btn_insert.setToolTip("在当前光标位置插入 N 帧当前姿态")
         btn_insert.clicked.connect(self.perform_frame_insert)
         h_insert.addWidget(btn_insert)
         
-        # 删除控制
         btn_delete = QPushButton("➖ 删除选区 (Delete)")
         btn_delete.setToolTip("删除蓝色选区内的所有帧")
         btn_delete.clicked.connect(self.perform_frame_delete)
         
-        l_frame_ops.addLayout(h_insert)
-        l_frame_ops.addWidget(btn_delete)
+        l_frame_ops.addLayout(h_insert); l_frame_ops.addWidget(btn_delete)
         g_frame_ops.setLayout(l_frame_ops)
+        tb_layout.addWidget(g_frame_ops)
         
-        # 布局添加
-        tb_layout.addWidget(g_frame_ops) # 放在最前面或合适位置
-        tb_layout.addWidget(btn_linear)
+        # B. 曲线生成组
+        g_curve_gen = QGroupBox("曲线生成")
+        l_curve_gen = QVBoxLayout()
+        btn_linear = QPushButton("📏 直线连接 (Linear)"); btn_linear.clicked.connect(lambda: self.apply_connect("linear"))
+        btn_sigmoid = QPushButton("🌊 S形连接 (Sigmoid)"); btn_sigmoid.clicked.connect(lambda: self.apply_connect("sigmoid"))
+        l_curve_gen.addWidget(btn_linear); l_curve_gen.addWidget(btn_sigmoid)
+        g_curve_gen.setLayout(l_curve_gen)
+        tb_layout.addWidget(g_curve_gen)
         
-        tb_layout.addWidget(btn_linear); tb_layout.addWidget(btn_sigmoid)
-        tb_layout.addSpacing(10)
-        tb_layout.addWidget(btn_smooth); tb_layout.addWidget(btn_add)
-        tb_layout.addStretch()
-        tb_layout.addWidget(btn_reset)
+        # C. 批处理组
+        g_batch = QGroupBox("批处理")
+        l_batch = QVBoxLayout()
+        btn_smooth = QPushButton("💧 SavGol 平滑"); btn_smooth.clicked.connect(self.apply_smooth_savgol)
+        btn_add = QPushButton("✨ 叠加插值 (Additive)"); btn_add.clicked.connect(self.apply_additive)
+        btn_mirror = QPushButton("🪞 动作镜像 (Mirror)"); btn_mirror.clicked.connect(self.apply_mirror_action)
+        btn_reset = QPushButton("🔄 重置选中区域"); btn_reset.clicked.connect(self.reset_original)
+        
+        l_batch.addWidget(btn_smooth); l_batch.addWidget(btn_add); 
+        l_batch.addWidget(btn_mirror); l_batch.addWidget(btn_reset)
+        g_batch.setLayout(l_batch)
+        tb_layout.addWidget(g_batch)
+
+        tb_layout.addStretch() # 底部留白
         self.tabs.addTab(tab_tools, "🛠️ 工具")
         
         # --- Tab 2: Spline ---
@@ -252,7 +252,7 @@ class MainWindow(QMainWindow):
         smpl_l.addWidget(self.chk_ref_vis)
         
         # Frame Scale
-        scale_l = QHBoxLayout(); scale_l.addWidget(QLabel("Scale:")); sp_scale = QDoubleSpinBox(); sp_scale.setRange(0.1, 10.0); sp_scale.setValue(1.0); sp_scale.valueChanged.connect(lambda v: setattr(self.mujoco_widget, 'smplx_frame_scale', v) or self.mujoco_widget.update()); scale_l.addWidget(sp_scale); smpl_l.addLayout(scale_l)
+        scale_l = QHBoxLayout(); scale_l.addWidget(QLabel("Scale:")); sp_scale = QDoubleSpinBox(); sp_scale.setRange(0.1, 10.0); sp_scale.setValue(3.0); sp_scale.valueChanged.connect(lambda v: setattr(self.mujoco_widget, 'smplx_frame_scale', v) or self.mujoco_widget.update()); scale_l.addWidget(sp_scale); smpl_l.addLayout(scale_l)
         
         # Offset
         off_l = QHBoxLayout(); off_l.addWidget(QLabel("X:")); sp_x = QDoubleSpinBox(); sp_x.setRange(-5,5); sp_x.valueChanged.connect(lambda v: self.update_smpl_offset(0,v)); off_l.addWidget(sp_x)
@@ -331,11 +331,23 @@ class MainWindow(QMainWindow):
         window_len = min(len(data_chunk), 31)
         if window_len % 2 == 0: window_len -= 1
         
-        if window_len >= 3:
-            smoothed = savgol_filter(data_chunk, window_len, 3) # polyorder 3
+        # Ensure window_len > polyorder
+        polyorder = 3
+        if window_len <= polyorder:
+            # Reduce polyorder to fit the window, or use a minimum
+            polyorder = min(polyorder, window_len - 1)
+            if polyorder < 0:
+                polyorder = 0  # Minimum possible order
+        
+        if window_len >= 3 and polyorder >= 0:
+            smoothed = savgol_filter(data_chunk, window_len, polyorder) # polyorder dynamically adjusted
             self.backend.df.iloc[s:e+1, col] = smoothed
             self.backend.modified_frames.update(range(s, e+1))
             self.refresh_ui("Applied SavGol Smooth")
+        else:
+            # For very short windows, use a simple average instead of failing
+            self.backend.df.iloc[s:e+1, col] = np.mean(data_chunk)
+            self.refresh_ui("Applied Average Smooth (too short for SavGol)")
 
     # --- Spline Functions ---
     def toggle_spline_mode(self):
@@ -383,8 +395,8 @@ class MainWindow(QMainWindow):
                     self.backend.ref_joints, 
                     self.backend.ref_parents
                 )
-                self.status_bar.showMessage(f"SMPL-X Loaded: {len(self.backend.smplx_joints)} frames")
-                self.mujoco_widget.smplx_offset = np.array([0.0, 1.0, 0.0])
+                self.status_bar.showMessage(f"SMPL-X Loaded: {len(self.backend.ref_joints)} frames")
+                self.mujoco_widget.ref_offset = np.array([0.0, 1.0, 0.0])
                 self.mujoco_widget.update()
             else:
                 QMessageBox.warning(self, "Error", "Failed to load SMPL-X. Check console for details.")
@@ -404,7 +416,7 @@ class MainWindow(QMainWindow):
                     self.backend.ref_parents
                 )
                 self.status_bar.showMessage(f"BVH Loaded: {len(self.backend.ref_joints)} frames")
-                self.mujoco_widget.smplx_offset = np.array([0.0, 1.0, 1.0]) # 重置偏移
+                self.mujoco_widget.ref_offset = np.array([0.0, 1.0, 1.0]) # 重置偏移
                 self.mujoco_widget.update()
             else:
                 QMessageBox.warning(self, "Error", f"BVH Load Failed: {result}")
@@ -530,6 +542,7 @@ class MainWindow(QMainWindow):
         self.audio_track.current_line.blockSignals(False)
         
         # 3. 更新后端和画面
+        self.mujoco_widget.current_frame_idx = idx # 同步帧号给渲染器
         self.backend.set_frame(idx)
         self.mujoco_widget.update() 
 
@@ -545,6 +558,7 @@ class MainWindow(QMainWindow):
         idx = max(0, min(self.total_frames-1, idx))
         self.current_frame = idx
         self.lbl_frame.setText(f"{idx:04d}")
+        self.mujoco_widget.current_frame_idx = idx # 同步帧号给渲染器
         self.backend.set_frame(idx)
         self.mujoco_widget.update()
         
@@ -718,3 +732,21 @@ class MainWindow(QMainWindow):
 
         if next_idx >= self.total_frames: next_idx = 0
         self.update_frame(next_idx)
+
+    def apply_mirror_action(self):
+        s = self.spin_start.value()
+        e = self.spin_end.value()
+        
+        # 弹窗确认，因为这是一个大范围修改
+        reply = QMessageBox.question(self, '确认镜像', 
+                                     f"确定要将第 {s} 到 {e} 帧进行左右镜像吗？\n这将交换左右手脚的数据。",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            if self.backend.apply_mirror(s, e):
+                # 刷新曲线和画面
+                self.refresh_ui(f"已镜像范围 {s}-{e}")
+                # 如果当前选中的是左手，镜像后可能想看右手的情况，
+                # 重新绘制当前选中的曲线
+                if self.graph.selected_joint_idx is not None:
+                    self.graph.update_curves([self.graph.selected_joint_idx])

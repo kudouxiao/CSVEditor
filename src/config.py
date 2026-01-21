@@ -2,18 +2,18 @@ import numpy as np
 import mujoco
 
 # ============ 默认路径 ============
-DEFAULT_CSV_PATH = "/home/jq/project/CSVEditor/retargeted/right31.csv"
+DEFAULT_CSV_PATH = "/home/jq/project/CSVEditor/retargeted/guolaoshi5.csv"
 DEFAULT_MODEL_PATH = "/home/jq/project/CSVEditor/assets/unitree_g1/g1_mocap_29dof.xml"
 
 # SMPL-X 配置
-DEFAULT_SMPLX_DATA_PATH = "/home/jq/project/CSVEditor/smplx/left91.npz"
+DEFAULT_SMPLX_DATA_PATH = "/home/jq/project/CSVEditor/smplx/guolaoshi5.npz"
 SMPLX_BODY_MODEL_DIR = "/home/jq/project/CSVEditor/assets/body_models" 
 
 # ============ BVH 配置 ============
 DEFAULT_BVH_PATH = "/home/jq/project/CSVEditor/bvh/left71_cut-zuo.bvh" 
 
 # 可选值: "SMPL", "BVH", "AUTO" (AUTO = 优先SMPL，没有则找BVH)
-REF_LOAD_MODE = "BVH"
+REF_LOAD_MODE = "AUTO"
 
 ROBOT_FPS = 30
 

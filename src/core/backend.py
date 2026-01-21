@@ -293,3 +293,90 @@ class G1Backend(QObject):
     def redo(self):
         if not self.redo_stack: return False
         self.undo_stack.append(self.df); self.df = self.redo_stack.pop(); return True
+
+    def apply_mirror(self, start_frame, end_frame):
+        """
+        对指定范围内的动作进行左右镜像
+        逻辑：
+        1. Root: Pos Y 取反, Quat X/Z 取反
+        2. Body: 左关节数据 <-> 右关节数据
+        3. Sign: Roll/Yaw 关节取反
+        """
+        if self.df is None: return False
+        self.snapshot()
+        
+        # 1. 准备数据切片
+        # 注意：这里必须使用 copy()，否则交换时会互相覆盖
+        subset = self.df.iloc[start_frame:end_frame+1].copy()
+        
+        # === A. Root 处理 (前7列) ===
+        # Root Pos: [X, Y, Z] -> Y 取反
+        subset.iloc[:, 1] *= -1 
+        
+        # Root Quat: [W, X, Y, Z] -> X, Z 取反 (假设 MuJoCo 格式 w,x,y,z)
+        # 镜像原理：翻转 Roll(x) 和 Yaw(z)，保留 Pitch(y)
+        subset.iloc[:, 4] *= -1 # qx
+        subset.iloc[:, 6] *= -1 # qz
+        
+        # === B. 关节处理 (交换 + 取反) ===
+        # 建立映射表 (仅在第一次运行时建立，提高性能)
+        if not hasattr(self, 'mirror_pairs'):
+            self.build_mirror_map()
+            
+        # 临时存储镜像后的关节数据
+        mirrored_joints = subset.iloc[:, 7:].copy()
+        
+        # 遍历映射表进行交换和取反
+        for src_col, dst_col, flip_sign in self.mirror_pairs:
+            # 获取原始数据
+            src_data = subset.iloc[:, src_col].values
+            dst_data = subset.iloc[:, dst_col].values
+            
+            # 交换并处理符号
+            # 目标列 = 源数据 * (符号因子)
+            mirrored_joints.iloc[:, dst_col - 7] = src_data * (-1 if flip_sign else 1)
+            mirrored_joints.iloc[:, src_col - 7] = dst_data * (-1 if flip_sign else 1)
+            
+        # 覆盖回 subset
+        self.df.iloc[start_frame:end_frame+1, 7:] = mirrored_joints
+        
+        # 标记修改
+        self.modified_frames.update(range(start_frame, end_frame+1))
+        return True
+
+    def build_mirror_map(self):
+        """
+        自动构建左右关节映射表
+        return: list of (src_col_idx, dst_col_idx, needs_flip)
+        """
+        self.mirror_pairs = []
+        processed_indices = set()
+        
+        for i, name in enumerate(self.csv_joint_names):
+            col_idx = 7 + i
+            if i in processed_indices: continue
+            
+            # 1. 处理左右对称关节 (Left <-> Right)
+            if "left" in name:
+                target_name = name.replace("left", "right")
+                try:
+                    target_i = self.csv_joint_names.index(target_name)
+                    # 确定是否需要取反
+                    # 经验法则：Pitch 不反，Roll/Yaw 反
+                    needs_flip = ("roll" in name) or ("yaw" in name)
+                    
+                    self.mirror_pairs.append((col_idx, 7 + target_i, needs_flip))
+                    processed_indices.add(i)
+                    processed_indices.add(target_i)
+                except ValueError:
+                    print(f"[Mirror] Warning: No pair found for {name}")
+            
+            # 2. 处理中轴关节 (Waist)
+            elif "waist" in name:
+                # 中轴关节不交换，只取反
+                # Waist Yaw/Roll 取反，Pitch 不变
+                needs_flip = ("roll" in name) or ("yaw" in name)
+                if needs_flip:
+                    # 自己跟自己换 = 原地取反
+                    self.mirror_pairs.append((col_idx, col_idx, True))
+                processed_indices.add(i)
