@@ -344,6 +344,77 @@ class G1Backend(QObject):
         self.modified_frames.update(range(start_frame, end_frame+1))
         return True
 
+    def align_global_coordinates(self, junction_frame):
+        """
+        自动对齐全局坐标：在指定帧处对齐后续动作的根位置和朝向
+        
+        参数:
+            junction_frame: 拼接点帧索引（后一段动作的起始帧）
+        
+        功能:
+            1. 计算拼接点处的位置和朝向差异
+            2. 对后一段动作应用平移和旋转，使其在拼接点处连续
+            3. 保持后一段动作的相对运动特征
+        """
+        if self.df is None or junction_frame <= 0 or junction_frame >= len(self.df):
+            return False
+        
+        self.snapshot()
+        
+        # 1. 获取拼接点前后两帧的根位置和朝向
+        frame_before = junction_frame - 1
+        frame_after = junction_frame
+        
+        # Root Position (X, Y, Z)
+        pos_before = self.df.iloc[frame_before, 0:3].values.astype(float)
+        pos_after = self.df.iloc[frame_after, 0:3].values.astype(float)
+        
+        # Root Quaternion (W, X, Y, Z)
+        quat_before = self.df.iloc[frame_before, 3:7].values.astype(float)
+        quat_after = self.df.iloc[frame_after, 3:7].values.astype(float)
+        
+        # 2. 计算位置偏移
+        pos_offset = pos_before - pos_after
+        
+        # 3. 计算旋转差异（四元数）
+        # q_before = q_offset * q_after
+        # q_offset = q_before * conjugate(q_after)
+        quat_after_conj = quat_after.copy()
+        quat_after_conj[1:] *= -1  # 共轭：保持w，翻转x,y,z
+        
+        # 四元数乘法: q1 * q2
+        def quat_multiply(q1, q2):
+            w1, x1, y1, z1 = q1
+            w2, x2, y2, z2 = q2
+            return np.array([
+                w1*w2 - x1*x2 - y1*y2 - z1*z2,
+                w1*x2 + x1*w2 + y1*z2 - z1*y2,
+                w1*y2 - x1*z2 + y1*w2 + z1*x2,
+                w1*z2 + x1*y2 - y1*x2 + z1*w2
+            ])
+        
+        quat_offset = quat_multiply(quat_before, quat_after_conj)
+        
+        # 归一化
+        quat_offset /= np.linalg.norm(quat_offset)
+        
+        # 4. 对后续所有帧应用偏移
+        for i in range(frame_after, len(self.df)):
+            # 应用位置偏移
+            self.df.iloc[i, 0:3] += pos_offset
+            
+            # 应用旋转偏移
+            current_quat = self.df.iloc[i, 3:7].values.astype(float)
+            new_quat = quat_multiply(quat_offset, current_quat)
+            new_quat /= np.linalg.norm(new_quat)  # 归一化
+            self.df.iloc[i, 3:7] = new_quat
+        
+        # 标记修改的帧
+        self.modified_frames.update(range(frame_after, len(self.df)))
+        
+        print(f"[Align] Applied offset: Pos={pos_offset}, Quat={quat_offset}")
+        return True
+
     def build_mirror_map(self):
         """
         自动构建左右关节映射表

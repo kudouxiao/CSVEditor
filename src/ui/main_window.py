@@ -216,10 +216,12 @@ class MainWindow(QMainWindow):
         btn_smooth = QPushButton("💧 SavGol 平滑"); btn_smooth.clicked.connect(self.apply_smooth_savgol)
         btn_add = QPushButton("✨ 叠加插值 (Additive)"); btn_add.clicked.connect(self.apply_additive)
         btn_mirror = QPushButton("🪞 动作镜像 (Mirror)"); btn_mirror.clicked.connect(self.apply_mirror_action)
+        btn_align = QPushButton("🔗 对齐全局坐标 (Align)"); btn_align.clicked.connect(self.align_global_coords)
+        btn_align.setToolTip("在当前帧处对齐后续动作，用于拼接两段动作")
         btn_reset = QPushButton("🔄 重置选中区域"); btn_reset.clicked.connect(self.reset_original)
         
         l_batch.addWidget(btn_smooth); l_batch.addWidget(btn_add); 
-        l_batch.addWidget(btn_mirror); l_batch.addWidget(btn_reset)
+        l_batch.addWidget(btn_mirror); l_batch.addWidget(btn_align); l_batch.addWidget(btn_reset)
         g_batch.setLayout(l_batch)
         tb_layout.addWidget(g_batch)
 
@@ -750,3 +752,29 @@ class MainWindow(QMainWindow):
                 # 重新绘制当前选中的曲线
                 if self.graph.selected_joint_idx is not None:
                     self.graph.update_curves([self.graph.selected_joint_idx])
+                    
+    def align_global_coords(self):
+        """
+        在当前播放帧处对齐后续动作的全局坐标
+        使用场景：拼接两段动作时，将光标移动到第二段的起始帧，点击此按钮
+        """
+        current = self.current_frame
+        if current <= 0:
+            QMessageBox.warning(self, "提示", "请将光标移动到拼接点（第二段动作的起始帧）")
+            return
+        
+        # 确认对话框
+        reply = QMessageBox.question(
+            self, 
+            "确认对齐",
+            f"将在帧 {current} 处对齐后续动作的全局坐标。\n\n"
+            f"此操作将修改从帧 {current} 到末尾的所有 Root 数据。\n\n是否继续？",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            if self.backend.align_global_coordinates(current):
+                self.refresh_ui(f"Aligned at frame {current}")
+                QMessageBox.information(self, "成功", f"已对齐帧 {current} 后的动作")
+            else:
+                QMessageBox.warning(self, "错误", "对齐失败，请检查帧范围")

@@ -2,7 +2,7 @@ import numpy as np
 import mujoco
 
 # ============ 默认路径 ============
-DEFAULT_CSV_PATH = "/home/jq/project/CSVEditor/retargeted/guolaoshi5.csv"
+DEFAULT_CSV_PATH = "/home/jq/project/CSVEditor/retargeted/chuanju_12pai_v5.csv"
 DEFAULT_MODEL_PATH = "/home/jq/project/CSVEditor/assets/unitree_g1/g1_mocap_29dof.xml"
 
 # SMPL-X 配置
