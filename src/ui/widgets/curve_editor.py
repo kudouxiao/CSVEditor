@@ -273,6 +273,12 @@ class CurveEditor(pg.PlotWidget):
         end = int(x_data[-1])
         
         self.backend_ref.df.iloc[start:end+1, col] = y_data
+
+        # --- 新增：如果修改的是四元数，立即清洗 ---
+        if col in [3, 4, 5, 6]:
+            self.backend_ref.sanitize_quaternions()
+        # -------------------------------------
+
         self.backend_ref.modified_frames.update(range(start, end+1))
         
         self.cancel_spline_mode()
@@ -459,6 +465,15 @@ class CurveEditor(pg.PlotWidget):
             # 刷新曲线
             self.curves[self.selected_joint_idx].setData(self.backend_ref.df.iloc[:, col].values)
             
+            # --- 检查是否修改了四元数组件，如果是则清洗整个四元数 ---
+            if col in [3, 4, 5, 6]:  # 如果正在编辑某个四元数分量
+                self.backend_ref.sanitize_quaternions()
+                # 必须重新绘制曲线，因为归一化会改变所有四元数分量的值
+                for quat_col in [3, 4, 5, 6]:
+                    if quat_col in self.curves:
+                        self.curves[quat_col].setData(self.backend_ref.df.iloc[:, quat_col].values)
+            # ----------------------------------------------------
+            
             # 刷新机器人
             curr_f = int(self.current_frame_line.value())
             self.backend_ref.set_frame(curr_f)
@@ -477,6 +492,17 @@ class CurveEditor(pg.PlotWidget):
             self.drag_start_data = None
             self.region.setMovable(True)
             ev.accept()
+
+            # --- 新增：拖拽结束，如果是四元数，立即清洗 ---
+            if self.selected_joint_idx in [3, 4, 5, 6]:
+                if self.backend_ref:
+                    self.backend_ref.sanitize_quaternions()
+                    # 必须重新绘制所有四元数曲线，因为归一化会改变所有分量的值
+                    for quat_col in [3, 4, 5, 6]:
+                        if quat_col in self.curves:
+                            self.curves[quat_col].setData(self.backend_ref.df.iloc[:, quat_col].values)
+            # ------------------------------------------
+
         else:
             super().mouseReleaseEvent(ev)
 

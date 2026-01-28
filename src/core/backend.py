@@ -451,3 +451,43 @@ class G1Backend(QObject):
                     # 自己跟自己换 = 原地取反
                     self.mirror_pairs.append((col_idx, col_idx, True))
                 processed_indices.add(i)
+
+
+    # === 在 G1Backend 类中添加此方法 ===
+    def sanitize_quaternions(self):
+        """
+        [核心修复] 强制清洗 Root 四元数：
+        1. 归一化 (Normalize): 保证 w^2+x^2+y^2+z^2 = 1，防止物理引擎报错。
+        2. 连续性 (Unwrap): 防止 q 和 -q 之间的跳变，消除“鬼畜”抖动。
+        """
+        if self.df is None: return
+
+        # 假设 Root Quat 是第 3,4,5,6 列 (W, X, Y, Z)
+        # 对应 all_names 中的 indices
+        quat_cols = [3, 4, 5, 6] 
+        
+        # 获取数据 (N, 4)
+        quats = self.df.iloc[:, quat_cols].values 
+
+        # 1. 归一化 (Normalization)
+        # 这一步会改变曲线数值，使其符合单位球约束
+        norms = np.linalg.norm(quats, axis=1, keepdims=True)
+        # 防止除以0 (如果某帧全是0，设为默认单位四元数)
+        zero_mask = norms.flatten() < 1e-8
+        quats[zero_mask] = np.array([1.0, 0.0, 0.0, 0.0])
+        norms[zero_mask] = 1.0
+        
+        quats /= norms
+
+        # 2. 连续性修正 (Quaternion Unwrapping)
+        # 检查相邻帧点积，如果 < 0，说明走到了对拓点，翻转符号
+        for i in range(1, len(quats)):
+            dot = np.dot(quats[i], quats[i-1])
+            if dot < 0:
+                quats[i] *= -1
+
+        # 写回 DataFrame
+        self.df.iloc[:, quat_cols] = quats
+        
+        # 这里的 print 可以注释掉，以免刷屏
+        # print("[System] Quaternions sanitized.")

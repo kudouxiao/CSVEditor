@@ -218,10 +218,20 @@ class MainWindow(QMainWindow):
         btn_mirror = QPushButton("🪞 动作镜像 (Mirror)"); btn_mirror.clicked.connect(self.apply_mirror_action)
         btn_align = QPushButton("🔗 对齐全局坐标 (Align)"); btn_align.clicked.connect(self.align_global_coords)
         btn_align.setToolTip("在当前帧处对齐后续动作，用于拼接两段动作")
+        # === 新增：手动修复四元数按钮 ===
+        btn_fix_quat = QPushButton("🔧 修复四元数 (Fix Quat)")
+        btn_fix_quat.setToolTip("强制归一化并修复 Root 旋转的连续性")
+        btn_fix_quat.clicked.connect(self.apply_quat_fix)
+        # ==============================
+
         btn_reset = QPushButton("🔄 重置选中区域"); btn_reset.clicked.connect(self.reset_original)
         
-        l_batch.addWidget(btn_smooth); l_batch.addWidget(btn_add); 
-        l_batch.addWidget(btn_mirror); l_batch.addWidget(btn_align); l_batch.addWidget(btn_reset)
+        l_batch.addWidget(btn_smooth)
+        l_batch.addWidget(btn_add)
+        l_batch.addWidget(btn_mirror)
+        l_batch.addWidget(btn_fix_quat) # 添加到布局
+        l_batch.addWidget(btn_align)
+        l_batch.addWidget(btn_reset)
         g_batch.setLayout(l_batch)
         tb_layout.addWidget(g_batch)
 
@@ -778,3 +788,16 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "成功", f"已对齐帧 {current} 后的动作")
             else:
                 QMessageBox.warning(self, "错误", "对齐失败，请检查帧范围")
+
+
+    # === 新增槽函数 ===
+    def apply_quat_fix(self):
+        self.backend.snapshot()
+        self.backend.sanitize_quaternions()
+        
+        # 如果当前正好选中了四元数通道，刷新一下显示
+        if self.graph.selected_joint_idx in [3, 4, 5, 6]:
+            self.graph.update_curves([self.graph.selected_joint_idx])
+            
+        self.backend.set_frame(self.current_frame)
+        self.status_bar.showMessage("四元数已清洗 (Normalized & Unwrapped)")
