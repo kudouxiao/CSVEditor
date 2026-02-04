@@ -7,6 +7,8 @@ import smplx
 import mujoco
 from PyQt5.QtCore import QObject, pyqtSignal
 import librosa # 引入音频库
+from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Slerp
 
 # 导入配置
 from src.config import CSV_JOINT_NAMES
@@ -41,7 +43,8 @@ class G1Backend(QObject):
 
         self.root_names = [
             "Root_Pos_X", "Root_Pos_Y", "Root_Pos_Z",
-            "Root_Quat_W", "Root_Quat_X", "Root_Quat_Y", "Root_Quat_Z"
+            # "Root_Quat_W", "Root_Quat_X", "Root_Quat_Y", "Root_Quat_Z",
+            "Root_Rot_Roll (Rx)", "Root_Rot_Pitch (Ry)", "Root_Rot_Yaw (Rz)" # 虚拟通道
         ]
 
         self.csv_joint_names = CSV_JOINT_NAMES
@@ -224,6 +227,121 @@ class G1Backend(QObject):
                 col = 7 + c_idx
                 if col < len(line): self.data.qpos[m_idx] = line[col]
             mujoco.mj_forward(self.model, self.data)
+
+
+    # === [新增] 四元数-欧拉角转换函数 ===
+    def quat_to_euler(self, quat):
+        """
+        将四元数转换为欧拉角 (XYZ顺序, 弧度)
+        quat: [w, x, y, z] 格式的四元数
+        返回: [rx, ry, rz] 格式的欧拉角
+        """
+        w, x, y, z = quat
+        
+        # x-axis rotation
+        sinr_cosp = 2 * (w * x + y * z)
+        cosr_cosp = 1 - 2 * (x * x + y * y)
+        rx = np.arctan2(sinr_cosp, cosr_cosp)
+        
+        # y-axis rotation  
+        sinp = 2 * (w * y - z * x)
+        if np.abs(sinp) >= 1:
+            ry = np.copysign(np.pi / 2, sinp)  # 使用1来避免奇点
+        else:
+            ry = np.arcsin(sinp)
+        
+        # z-axis rotation
+        siny_cosp = 2 * (w * z + x * y)
+        cosy_cosp = 1 - 2 * (y * y + z * z)
+        rz = np.arctan2(siny_cosp, cosy_cosp)
+        
+        return np.array([rx, ry, rz])
+    
+    def euler_to_quat(self, euler):
+        """
+        将欧拉角转换为四元数 (XYZ顺序, 弧度)
+        euler: [rx, ry, rz] 格式的欧拉角
+        返回: [w, x, y, z] 格式的四元数
+        """
+        rx, ry, rz = euler
+        
+        cx = np.cos(rx * 0.5)
+        sx = np.sin(rx * 0.5)
+        cy = np.cos(ry * 0.5)
+        sy = np.sin(ry * 0.5)
+        cz = np.cos(rz * 0.5)
+        sz = np.sin(rz * 0.5)
+        
+        w = cx * cy * cz - sx * sy * sz
+        x = sx * cy * cz + cx * sy * sz
+        y = cx * sy * cz - sx * cy * sz
+        z = cx * cy * sz + sx * sy * cz
+        
+        return np.array([w, x, y, z])
+    
+    def convert_frame_quat_to_euler(self, frame_idx):
+        """
+        将指定帧的四元数转换为欧拉角
+        frame_idx: 帧索引
+        返回: [rx, ry, rz] 格式的欧拉角
+        """
+        if self.df is None or frame_idx >= len(self.df): return None
+        
+        quat = self.df.iloc[frame_idx, 3:7].values  # [qw, qx, qy, qz] from our format
+        return self.quat_to_euler(quat)
+    
+    def set_frame_euler_rotation(self, frame_idx, euler_angles):
+        """
+        为指定帧设置欧拉角旋转（转换为四元数存储）
+        frame_idx: 帧索引
+        euler_angles: [rx, ry, rz] 格式的欧拉角
+        """
+        if self.df is None or frame_idx >= len(self.df): return False
+        
+        # 转换欧拉角为四元数
+        quat = self.euler_to_quat(euler_angles)
+        
+        # 存储到DataFrame
+        self.df.iloc[frame_idx, 3:7] = quat
+        
+        # 记录修改的帧
+        self.modified_frames.add(frame_idx)
+        
+        return True
+    
+    def convert_range_quat_to_euler(self, start_idx, end_idx):
+        """
+        将指定范围内的所有帧的四元数转换为欧拉角
+        返回: (N, 3) 形状的欧拉角数组
+        """
+        if self.df is None or start_idx >= len(self.df) or end_idx >= len(self.df): return None
+        
+        quats = self.df.iloc[start_idx:end_idx+1, 3:7].values  # (N, 4)
+        eulers = np.zeros((len(quats), 3))
+        
+        for i, quat in enumerate(quats):
+            eulers[i] = self.quat_to_euler(quat)
+        
+        return eulers
+    
+    def set_range_euler_rotation(self, start_idx, end_idx, euler_angles_array):
+        """
+        为指定范围内的帧设置欧拉角旋转（转换为四元数存储）
+        start_idx, end_idx: 帧范围
+        euler_angles_array: (N, 3) 形状的欧拉角数组
+        """
+        if self.df is None or start_idx >= len(self.df) or end_idx >= len(self.df): return False
+        if len(euler_angles_array) != (end_idx - start_idx + 1): return False
+        
+        for i in range(start_idx, end_idx + 1):
+            idx_in_array = i - start_idx
+            quat = self.euler_to_quat(euler_angles_array[idx_in_array])
+            self.df.iloc[i, 3:7] = quat
+        
+        # 记录修改的帧
+        self.modified_frames.update(range(start_idx, end_idx + 1))
+        
+        return True
 
 
     def insert_frames(self, frame_idx, count=1):
@@ -491,3 +609,136 @@ class G1Backend(QObject):
         
         # 这里的 print 可以注释掉，以免刷屏
         # print("[System] Quaternions sanitized.")
+
+# === 1. 批量转换: Quat -> Euler ===
+    def convert_range_quat_to_euler(self, start_frame, end_frame):
+        if self.df is None: return None
+        
+        # 取出 [W, X, Y, Z]
+        quats_wxyz = self.df.iloc[start_frame:end_frame+1, [3, 4, 5, 6]].values
+        
+        # 转为 Scipy 的 [X, Y, Z, W]
+        quats_xyzw = np.zeros_like(quats_wxyz)
+        quats_xyzw[:, 0] = quats_wxyz[:, 1]
+        quats_xyzw[:, 1] = quats_wxyz[:, 2]
+        quats_xyzw[:, 2] = quats_wxyz[:, 3]
+        quats_xyzw[:, 3] = quats_wxyz[:, 0]
+        
+        from scipy.spatial.transform import Rotation as R
+        r = R.from_quat(quats_xyzw)
+        
+        # 【修改】使用 'XYZ' (大写) 代表内旋 (Intrinsic Rotations)
+        # 这更符合直觉：先绕X转，再绕新的Y转...
+        eulers = r.as_euler('XYZ', degrees=False)
+        
+        # 解包，防止跳变
+        eulers_unwrapped = np.unwrap(eulers, axis=0)
+        
+        return eulers_unwrapped
+
+    # === 2. 批量应用: Euler -> Quat ===
+    def set_range_euler_rotation(self, start_frame, end_frame, eulers):
+        if self.df is None: return False
+        self.snapshot()
+        
+        from scipy.spatial.transform import Rotation as R
+        # 【修改】对应上面的 'XYZ'
+        r = R.from_euler('XYZ', eulers, degrees=False)
+        quats_xyzw = r.as_quat()
+        
+        # 转回 MuJoCo 的 [W, X, Y, Z]
+        quats_wxyz = np.zeros_like(quats_xyzw)
+        quats_wxyz[:, 0] = quats_xyzw[:, 3]
+        quats_wxyz[:, 1] = quats_xyzw[:, 0]
+        quats_wxyz[:, 2] = quats_xyzw[:, 1]
+        quats_wxyz[:, 3] = quats_xyzw[:, 2]
+        
+        # 写入
+        self.df.iloc[start_frame:end_frame+1, [3, 4, 5, 6]] = quats_wxyz
+        self.modified_frames.update(range(start_frame, end_frame+1))
+        return True
+
+    # === 3. 单帧预览: Euler -> Quat (必须与上面逻辑完全一致) ===
+    def preview_euler_frame(self, frame_idx, euler_xyz):
+        with self.lock:
+            from scipy.spatial.transform import Rotation as R
+            
+            # 【修改】同样使用 'XYZ'
+            r = R.from_euler('XYZ', euler_xyz, degrees=False)
+            q_xyzw = r.as_quat()
+            
+            # 转为 WXYZ
+            q_wxyz = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]])
+            
+            # 更新 MuJoCo 数据
+            self.data.qpos[3:7] = q_wxyz
+            
+            # 刷新计算
+            mujoco.mj_forward(self.model, self.data)
+
+    # === 核心：数据代理层 ===
+
+    def get_channel_data(self, ui_idx):
+        """根据 UI 索引获取曲线数据"""
+        if self.df is None: return np.array([])
+        
+        # A. Root Position (0, 1, 2) -> 直接读取 Col 0, 1, 2
+        if ui_idx < 3:
+            return self.df.iloc[:, ui_idx].values
+            
+        # B. Root Rotation (3, 4, 5) -> 读取 Quat(3-6) 转 Euler
+        elif 3 <= ui_idx <= 5:
+            # 取出全部帧的四元数 [W, X, Y, Z]
+            quats_wxyz = self.df.iloc[:, 3:7].values
+            # 转为 [X, Y, Z, W]
+            quats_xyzw = np.roll(quats_wxyz, -1, axis=1)
+            
+            r = R.from_quat(quats_xyzw)
+            eulers = r.as_euler('XYZ', degrees=False) # (N, 3)
+            eulers = np.unwrap(eulers, axis=0) # 连续性处理
+            
+            axis_idx = ui_idx - 3 # 0:x, 1:y, 2:z
+            return eulers[:, axis_idx]
+            
+        # C. Joints (6+) -> 读取 Col ui_idx + 1 (因为Quat占4位，Euler占3位，差1位)
+        else:
+            real_col = ui_idx + 1
+            return self.df.iloc[:, real_col].values
+
+    def set_channel_data(self, ui_idx, values, start_frame, end_frame):
+        """根据 UI 索引写入数据"""
+        if self.df is None: return
+        
+        # A. Root Position
+        if ui_idx < 3:
+            self.df.iloc[start_frame:end_frame+1, ui_idx] = values
+            
+        # B. Root Rotation (虚拟通道写入)
+        elif 3 <= ui_idx <= 5:
+            # 1. 获取选定范围内的原始四元数
+            subset_quats_wxyz = self.df.iloc[start_frame:end_frame+1, 3:7].values
+            subset_quats_xyzw = np.roll(subset_quats_wxyz, -1, axis=1)
+            
+            # 2. 转为欧拉角
+            r = R.from_quat(subset_quats_xyzw)
+            eulers = r.as_euler('XYZ', degrees=False)
+            eulers = np.unwrap(eulers, axis=0)
+            
+            # 3. 修改对应轴的数据
+            axis_idx = ui_idx - 3
+            eulers[:, axis_idx] = values # 覆盖为新曲线
+            
+            # 4. 转回四元数
+            r_new = R.from_euler('XYZ', eulers, degrees=False)
+            new_quats_xyzw = r_new.as_quat()
+            new_quats_wxyz = np.roll(new_quats_xyzw, 1, axis=1)
+            
+            # 5. 存回 DataFrame
+            self.df.iloc[start_frame:end_frame+1, 3:7] = new_quats_wxyz
+            
+        # C. Joints
+        else:
+            real_col = ui_idx + 1
+            self.df.iloc[start_frame:end_frame+1, real_col] = values
+            
+        self.modified_frames.update(range(start_frame, end_frame+1))

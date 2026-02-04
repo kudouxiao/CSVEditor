@@ -1,10 +1,11 @@
 import os
 import numpy as np
+import pyqtgraph as pg
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QLabel, QSplitter, QListWidget, 
                              QAbstractItemView, QFrame, QTabWidget, QScrollArea, 
                              QGroupBox, QCheckBox, QDoubleSpinBox, QComboBox, 
-                             QShortcut, QFileDialog, QMessageBox, QListWidgetItem, QSpinBox,QApplication)
+                             QShortcut, QFileDialog, QMessageBox, QListWidgetItem, QSpinBox, QApplication, QDialog)
                              # 引入媒体库
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtCore import QUrl
@@ -161,7 +162,7 @@ class MainWindow(QMainWindow):
         self.joint_list = QListWidget(); self.joint_list.setSelectionMode(QAbstractItemView.SingleSelection)
         for i, name in enumerate(self.backend.all_names):
             item = QListWidgetItem(f"[{i:02d}] {name.replace('_joint','')}")
-            if i < 7: item.setForeground(Qt.cyan)
+            if i < 6: item.setForeground(Qt.cyan)
             self.joint_list.addItem(item)
         self.joint_list.itemSelectionChanged.connect(self.on_selection_change)
         r_layout.addWidget(self.joint_list)
@@ -218,19 +219,26 @@ class MainWindow(QMainWindow):
         btn_mirror = QPushButton("🪞 动作镜像 (Mirror)"); btn_mirror.clicked.connect(self.apply_mirror_action)
         btn_align = QPushButton("🔗 对齐全局坐标 (Align)"); btn_align.clicked.connect(self.align_global_coords)
         btn_align.setToolTip("在当前帧处对齐后续动作，用于拼接两段动作")
-        # === 新增：手动修复四元数按钮 ===
-        btn_fix_quat = QPushButton("🔧 修复四元数 (Fix Quat)")
-        btn_fix_quat.setToolTip("强制归一化并修复 Root 旋转的连续性")
-        btn_fix_quat.clicked.connect(self.apply_quat_fix)
+        # # === 新增：手动修复四元数按钮 ===
+        # btn_fix_quat = QPushButton("🔧 修复四元数 (Fix Quat)")
+        # btn_fix_quat.setToolTip("强制归一化并修复 Root 旋转的连续性")
+        # btn_fix_quat.clicked.connect(self.apply_quat_fix)
         # ==============================
 
         btn_reset = QPushButton("🔄 重置选中区域"); btn_reset.clicked.connect(self.reset_original)
         
+        # # === 新增：Euler角编辑按钮 ===
+        # btn_euler_edit = QPushButton("🔄 Euler角编辑 (Euler Edit)")
+        # btn_euler_edit.setToolTip("切换到欧拉角编辑模式（仅适用于Root旋转）")
+        # btn_euler_edit.clicked.connect(self.toggle_euler_mode)
+        # # ==============================
+        
         l_batch.addWidget(btn_smooth)
         l_batch.addWidget(btn_add)
         l_batch.addWidget(btn_mirror)
-        l_batch.addWidget(btn_fix_quat) # 添加到布局
+        # l_batch.addWidget(btn_fix_quat) # 添加到布局
         l_batch.addWidget(btn_align)
+        # l_batch.addWidget(btn_euler_edit)  # 添加Euler按钮
         l_batch.addWidget(btn_reset)
         g_batch.setLayout(l_batch)
         tb_layout.addWidget(g_batch)
@@ -801,3 +809,41 @@ class MainWindow(QMainWindow):
             
         self.backend.set_frame(self.current_frame)
         self.status_bar.showMessage("四元数已清洗 (Normalized & Unwrapped)")
+
+    # 在 MainWindow 类中
+
+    def toggle_euler_mode(self):
+        """切换欧拉角编辑模式 (非模态窗口)"""
+        if self.graph.selected_joint_idx is None:
+            QMessageBox.warning(self, "警告", "请先选择Root旋转通道 (索引3-6)")
+            return
+            
+        if self.graph.selected_joint_idx not in [3, 4, 5, 6]:
+            reply = QMessageBox.question(self, "确认", 
+                                       "您选择的不是Root四元数通道。\n是否继续？",
+                                       QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.No: return
+        
+        s = self.spin_start.value()
+        e = self.spin_end.value()
+        if s >= e:
+            QMessageBox.warning(self, "提示", "范围无效 (Start >= End)")
+            return
+
+        # 1. 获取欧拉角数据
+        eulers = self.backend.convert_range_quat_to_euler(s, e)
+        if eulers is None: return
+        
+        # 2. 创建非模态对话框 (保存为成员变量防止被垃圾回收)
+        # 注意：这里我们不再使用 exec_() 阻塞
+        self.euler_dialog = EulerEditDialog(eulers, s, e, self)
+        
+        # 3. 智能定位：将弹窗移动到屏幕右下角或右侧，避开 MuJoCo
+        # 获取主窗口几何信息
+        geo = self.geometry()
+        # 尝试移动到主窗口右侧内部，或者右下角
+        dialog_x = geo.x() + geo.width() - 1050 # 假设弹窗宽1000，留点边距
+        dialog_y = geo.y() + geo.height() - 650
+        self.euler_dialog.move(max(geo.x(), dialog_x), max(geo.y(), dialog_y))
+        
+        self.euler_dialog.show() # 显示窗口，允许主界面继续运行
