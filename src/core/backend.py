@@ -742,3 +742,20 @@ class G1Backend(QObject):
             self.df.iloc[start_frame:end_frame+1, real_col] = values
             
         self.modified_frames.update(range(start_frame, end_frame+1))
+
+    def get_original_channel_data(self, ui_idx):
+        """获取原始数据的通道值 (用于 Ghost 显示)"""
+        if self.df_orig is None: return np.array([])
+        
+        if ui_idx < 3:
+            return self.df_orig.iloc[:, ui_idx].values
+        elif 3 <= ui_idx <= 5:
+            # 原始四元数转欧拉
+            quats_wxyz = self.df_orig.iloc[:, 3:7].values
+            quats_xyzw = np.roll(quats_wxyz, -1, axis=1)
+            r = R.from_quat(quats_xyzw)
+            eulers = r.as_euler('XYZ', degrees=False)
+            eulers = np.unwrap(eulers, axis=0)
+            return eulers[:, ui_idx - 3]
+        else:
+            return self.df_orig.iloc[:, ui_idx + 1].values

@@ -143,7 +143,7 @@ class CurveEditor(pg.PlotWidget):
             # 绘制 Ghost
             if self.show_ghost:
                 col = self.selected_joint_idx
-                orig_data = self.backend_ref.df_orig.iloc[:, col].values
+                orig_data = self.backend_ref.get_original_channel_data(col)
                 self.ghost_curve.setData(orig_data)
             else:
                 self.ghost_curve.setData([])
@@ -151,14 +151,14 @@ class CurveEditor(pg.PlotWidget):
             # 绘制背景线 (其他选中的)
             for idx in selected_indices[1:]:
                 col = idx
-                data = self.backend_ref.df.iloc[:, col].values
+                data = self.backend_ref.get_channel_data(col)
                 curve = self.plot(data, pen=pg.mkPen((80, 80, 80), width=1))
                 curve.setZValue(5)
                 self.curves[idx] = curve
             
             # 绘制主线 (高亮)
             col = self.selected_joint_idx
-            data = self.backend_ref.df.iloc[:, col].values
+            data = self.backend_ref.get_channel_data(col)
             main_curve = self.plot(data, pen=pg.mkPen('#00ffff', width=3))
             main_curve.setZValue(20)
             self.curves[self.selected_joint_idx] = main_curve
@@ -187,16 +187,23 @@ class CurveEditor(pg.PlotWidget):
         self.region.setMovable(False)
         col = self.selected_joint_idx
         
+        # [FIX]: 使用 get_channel_data 代替 df.iloc
+        full_data = self.backend_ref.get_channel_data(col) 
+        
         slope_in = 0.0; slope_out = 0.0
         if start_frame > 0:
-            slope_in = self.backend_ref.df.iloc[start_frame, col] - self.backend_ref.df.iloc[start_frame-1, col]
-        total_len = len(self.backend_ref.df)
+            slope_in = full_data[start_frame] - full_data[start_frame-1]
+        
+        # 注意: total_len 还是从 df 获取是安全的，因为行数是一致的
+        total_len = len(self.backend_ref.df) 
         if end_frame < total_len - 1:
-            slope_out = self.backend_ref.df.iloc[end_frame+1, col] - self.backend_ref.df.iloc[end_frame, col]
+            slope_out = full_data[end_frame+1] - full_data[end_frame]
         self.spline_boundary_slopes = (slope_in, slope_out)
         
         self.spline_anchors_x = np.linspace(start_frame, end_frame, num_anchors).astype(int)
-        self.spline_anchors_y = self.backend_ref.df.iloc[self.spline_anchors_x, col].values
+        
+        # [FIX]: 获取锚点数据时也要用 get_channel_data
+        self.spline_anchors_y = full_data[self.spline_anchors_x] 
         self.update_spline_visuals()
 
     def update_spline_visuals(self):
@@ -223,11 +230,15 @@ class CurveEditor(pg.PlotWidget):
         start = int(x_data[0])
         end = int(x_data[-1])
         
-        self.backend_ref.df.iloc[start:end+1, col] = y_data
+        # [FIX]: 使用 set_channel_data 写入数据，自动处理索引偏移
+        self.backend_ref.set_channel_data(col, y_data, start, end)
         
-        # 实时清洗四元数
-        if col in [3, 4, 5, 6]:
-            self.backend_ref.sanitize_quaternions()
+        # 实时清洗四元数 (Root Rotation 是 3,4,5)
+        # 这里的 col 是 UI 索引，3-5 对应欧拉角，Backend 内部会处理转四元数
+        if col in [3, 4, 5]: 
+             # set_channel_data 内部已经处理了欧拉转四元数，通常不需要额外清洗，
+             # 但为了保险起见，可以调用全局清洗
+             pass 
             
         self.backend_ref.modified_frames.update(range(start, end+1))
         self.cancel_spline_mode()
@@ -276,14 +287,17 @@ class CurveEditor(pg.PlotWidget):
             total_len = len(self.backend_ref.df)
             col = self.selected_joint_idx
             
+            # [FIX]: 获取当前通道的全量数据用于计算 delta
+            full_data = self.backend_ref.get_channel_data(col)
+            
             # 判断点击位置
             if r_min <= click_x <= r_max:
                 # 局部模式
                 s_local, e_local = int(r_min), int(r_max)
                 s_local = max(0, s_local); e_local = min(total_len-1, e_local)
                 region_len = e_local - s_local
-                self.drag_start_data = self.backend_ref.df.iloc[s_local:e_local+1, col].values.copy()
-                
+                # [FIX]: 使用从 get_channel_data 获取的 full_data
+                self.drag_start_data = full_data[s_local:e_local+1].copy()
                 if region_len > 0:
                     normalized_x = (click_x - s_local) / region_len
                     if normalized_x < 0.2:
@@ -301,11 +315,11 @@ class CurveEditor(pg.PlotWidget):
                 if click_x < global_threshold:
                     self.drag_mode = "GLOBAL_START"
                     if self.main_window_ref: self.main_window_ref.status_bar.showMessage("模式: 全局起点调节")
-                    self.drag_start_data = self.backend_ref.df.iloc[:, col].values.copy()
+                    self.drag_start_data = full_data.copy()
                 elif click_x > (total_len - global_threshold):
                     self.drag_mode = "GLOBAL_END"
                     if self.main_window_ref: self.main_window_ref.status_bar.showMessage("模式: 全局终点调节")
-                    self.drag_start_data = self.backend_ref.df.iloc[:, col].values.copy()
+                    self.drag_start_data = full_data.copy()
                 else:
                     self.is_editing = False
                     ev.ignore()
@@ -342,18 +356,8 @@ class CurveEditor(pg.PlotWidget):
             y_curr = pos.y()
             delta_y = y_curr - self.drag_start_pos
             col = self.selected_joint_idx
-            
-            if "GLOBAL" in self.drag_mode:
-                total_len = len(self.backend_ref.df)
-                x = np.linspace(0, 1, total_len)
-                if self.drag_mode == "GLOBAL_START": weights = 1 - x
-                elif self.drag_mode == "GLOBAL_END": weights = x
-                if self.drag_start_data is not None:
-                    new_values = self.drag_start_data + (delta_y * weights)
-                    self.backend_ref.df.iloc[:, col] = new_values
-                    self.backend_ref.modified_frames.update(range(0, total_len))
-            
-            elif "LOCAL" in self.drag_mode:
+
+            if "LOCAL" in self.drag_mode:
                 r_min, r_max = self.region.getRegion()
                 s, e = int(r_min), int(r_max)
                 s = max(0, s); e = min(len(self.backend_ref.df)-1, e)
@@ -368,17 +372,26 @@ class CurveEditor(pg.PlotWidget):
                     else: weights = np.ones_like(x)
 
                     new_values = self.drag_start_data + (delta_y * weights)
-                    self.backend_ref.df.iloc[s:e+1, col] = new_values
+                    # [FIX]: 使用 set_channel_data 而不是直接修改 df.iloc
+                    self.backend_ref.set_channel_data(col, new_values, s, e)
                     self.backend_ref.modified_frames.update(range(s, e+1))
+            
+            elif "GLOBAL" in self.drag_mode:
+                total_len = len(self.backend_ref.df)
+                x = np.linspace(0, 1, total_len)
+                if self.drag_mode == "GLOBAL_START": weights = 1 - x
+                elif self.drag_mode == "GLOBAL_END": weights = x
+                if self.drag_start_data is not None:
+                    new_values = self.drag_start_data + (delta_y * weights)
+                    # [FIX]: 使用 set_channel_data 而不是直接修改 df.iloc
+                    self.backend_ref.set_channel_data(col, new_values, 0, total_len-1)
+                    self.backend_ref.modified_frames.update(range(0, total_len))
 
-            # === 实时清洗四元数 ===
-            if col in [3, 4, 5, 6]: 
-                self.backend_ref.sanitize_quaternions()
-                # 重新绘制该曲线（因为数据被归一化了）
-                self.curves[col].setData(self.backend_ref.df.iloc[:, col].values)
-            else:
-                # 普通曲线直接刷新
-                self.curves[self.selected_joint_idx].setData(self.backend_ref.df.iloc[:, col].values)
+            # === 刷新逻辑 ===
+            # [FIX]: 重新获取数据来刷新曲线，确保看到的是 Backend 处理后的结果（尤其是 Root 旋转）
+            updated_data = self.backend_ref.get_channel_data(col)
+            if self.selected_joint_idx in self.curves:
+                self.curves[self.selected_joint_idx].setData(updated_data)
             
             # 刷新机器人
             curr_f = int(self.current_frame_line.value())

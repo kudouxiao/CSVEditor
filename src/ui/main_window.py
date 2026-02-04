@@ -325,8 +325,10 @@ class MainWindow(QMainWindow):
         col = self.graph.selected_joint_idx # 直接使用 idx
         
         if s >= e: return
-        val_start = self.backend.df.iloc[s, col]
-        val_end = self.backend.df.iloc[e, col]
+        # [FIX]: 使用 get_channel_data 读取起点和终点
+        full_data = self.backend.get_channel_data(col)
+        val_start = full_data[s]
+        val_end = full_data[e]
         count = e - s + 1
         
         if mode == "linear":
@@ -336,8 +338,8 @@ class MainWindow(QMainWindow):
             w = (1 - np.cos(t * np.pi)) / 2
             new_vals = val_start + (val_end - val_start) * w
             
-        self.backend.df.iloc[s:e+1, col] = new_vals
-        self.backend.modified_frames.update(range(s, e+1))
+        # [FIX]: 使用 set_channel_data 写入
+        self.backend.set_channel_data(col, new_vals, s, e)
         self.refresh_ui(f"Applied {mode} connect")
 
     def apply_smooth_savgol(self):
@@ -346,7 +348,8 @@ class MainWindow(QMainWindow):
         s, e = self.spin_start.value(), self.spin_end.value()
         col = self.graph.selected_joint_idx
         
-        data_chunk = self.backend.df.iloc[s:e+1, col].values
+        full_data = self.backend.get_channel_data(col)
+        data_chunk = full_data[s:e+1]
         # Window size must be odd and <= length
         window_len = min(len(data_chunk), 31)
         if window_len % 2 == 0: window_len -= 1
@@ -361,12 +364,14 @@ class MainWindow(QMainWindow):
         
         if window_len >= 3 and polyorder >= 0:
             smoothed = savgol_filter(data_chunk, window_len, polyorder) # polyorder dynamically adjusted
-            self.backend.df.iloc[s:e+1, col] = smoothed
-            self.backend.modified_frames.update(range(s, e+1))
+            self.backend.set_channel_data(col, smoothed, s, e)
             self.refresh_ui("Applied SavGol Smooth")
         else:
             # For very short windows, use a simple average instead of failing
-            self.backend.df.iloc[s:e+1, col] = np.mean(data_chunk)
+            avg_value = np.mean(data_chunk)
+            # Create array of same length as the selected range
+            avg_array = np.full(len(data_chunk), avg_value)
+            self.backend.set_channel_data(col, avg_array, s, e)
             self.refresh_ui("Applied Average Smooth (too short for SavGol)")
 
     # --- Spline Functions ---
@@ -609,45 +614,56 @@ class MainWindow(QMainWindow):
         e = min(self.total_frames-1, e)
         # 修改：直接使用 selected_joint_idx
         col = self.graph.selected_joint_idx 
-        self.backend.df.iloc[s:e+1, col] = self.backend.df.iloc[s:e+1, col].rolling(window=5, center=True).mean().fillna(method='bfill').fillna(method='ffill')
-        self.graph.update_curves([self.graph.selected_joint_idx])
-        self.backend.set_frame(self.current_frame)
-        self.mujoco_widget.update()
-        self.status_bar.showMessage("Smoothed")
+        full_data = self.backend.get_channel_data(col)
+        series = pd.Series(full_data)
+        
+        # 对全局做平滑，然后只取选区写入 (或者只对选区平滑，看需求，这里保持跟原逻辑类似但只取选区)
+        # 注意：原逻辑 iloc 替换是只替换选区，但 rolling 需要上下文。
+        # 简单做法：只平滑选区
+        chunk_series = pd.Series(full_data[s:e+1])
+        smoothed = chunk_series.rolling(window=5, center=True).mean().fillna(method='bfill').fillna(method='ffill').values
+        
+        self.backend.set_channel_data(col, smoothed, s, e)
+        self.refresh_ui("Smoothed")
 
     def apply_additive(self):
-        if self.graph.selected_joint_idx is None: 
-            return
+        if self.graph.selected_joint_idx is None: return
         self.backend.snapshot()
-        r_min, r_max = self.graph.region.getRegion()
-        s, e = int(r_min), int(r_max)
-        if s >= e: 
-            return
-        # 修改：直接使用 selected_joint_idx
+        s, e = self.spin_start.value(), self.spin_end.value()
+        if s >= e: return
         col = self.graph.selected_joint_idx
-        orig, curr = self.backend.df_orig, self.backend.df
-        delta_s = curr.iloc[s, col] - orig.iloc[s, col]
-        delta_e = curr.iloc[e, col] - orig.iloc[e, col]
+        
+        # [FIX]: 获取原始数据和当前数据 (使用 get_original_channel_data)
+        orig_data = self.backend.get_original_channel_data(col)
+        curr_data = self.backend.get_channel_data(col)
+        
+        if len(orig_data) == 0 or len(curr_data) == 0: return
+
+        delta_s = curr_data[s] - orig_data[s]
+        delta_e = curr_data[e] - orig_data[e]
+        
         interp = PchipInterpolator([s, e], [delta_s, delta_e])
-        curr.iloc[s:e+1, col] = orig.iloc[s:e+1, col] + interp(np.arange(s, e + 1))
-        self.graph.update_curves([self.graph.selected_joint_idx])
-        self.backend.set_frame(self.current_frame)
-        self.mujoco_widget.update()
-        self.status_bar.showMessage("Interpolated")
+        
+        # 计算叠加后的值
+        base_values = orig_data[s:e+1]
+        additive_values = interp(np.arange(s, e + 1))
+        new_values = base_values + additive_values
+        
+        self.backend.set_channel_data(col, new_values, s, e)
+        self.refresh_ui("Interpolated")
 
     def reset_original(self):
-        if self.graph.selected_joint_idx is None: 
-            return
+        if self.graph.selected_joint_idx is None: return
         self.backend.snapshot()
-        r_min, r_max = self.graph.region.getRegion()
-        s, e = int(r_min), int(r_max)
-        # 修改：直接使用 selected_joint_idx
+        s, e = self.spin_start.value(), self.spin_end.value()
         col = self.graph.selected_joint_idx
-        self.backend.df.iloc[s:e+1, col] = self.backend.df_orig.iloc[s:e+1, col]
-        self.graph.update_curves([self.graph.selected_joint_idx])
-        self.backend.set_frame(self.current_frame)
-        self.mujoco_widget.update()
-        self.status_bar.showMessage("Reset")
+        
+        # [FIX]: 从 Ghost 数据恢复
+        orig_data = self.backend.get_original_channel_data(col)
+        if len(orig_data) > 0:
+            subset = orig_data[s:e+1]
+            self.backend.set_channel_data(col, subset, s, e)
+            self.refresh_ui("Reset")
 
     # === 修改撤销/重做 (清除高亮) ===
     def perform_undo(self):
