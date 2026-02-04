@@ -119,19 +119,21 @@ class G1Backend(QObject):
             print(f"Load Error: {e}")
             return False, 0
 
-    # === [新增] 获取限位函数 ===
+    # === [修复] 获取限位函数 ===
     def get_joint_limits(self, ui_index):
         """
         根据 UI 列表索引返回 (min, max) 或 None
-        ui_index: 0-6 (Root), 7+ (Joints)
+        需要与 get_channel_data 方法保持一致
         """
         if self.model is None: return None
         
-        # Root 没有限位
-        if ui_index < 7: return None
+        # Root 没有限位 (Position: 0-2, Rotation: 3-5)
+        if ui_index < 6: return None
         
         # 映射回 CSV 索引
-        csv_idx = ui_index - 7
+        # get_channel_data 中，关节数据从 ui_idx >= 6 开始，映射到列 ui_idx + 1
+        # 所以关节数据列是 7+, 对应关节索引是 (ui_idx + 1) - 7 = ui_idx - 6
+        csv_idx = ui_index - 6
         
         if csv_idx in self.joint_id_mapping:
             jnt_id = self.joint_id_mapping[csv_idx]
