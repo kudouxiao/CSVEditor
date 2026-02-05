@@ -146,11 +146,18 @@ class MainWindow(QMainWindow):
 
         # 播放控制
         play_ctrl = QHBoxLayout()
-        self.btn_prev = QPushButton("◀"); self.btn_prev.clicked.connect(lambda: self.jump(-1))
-        self.btn_play = QPushButton("▶ 播放"); self.btn_play.clicked.connect(self.toggle_play)
-        self.btn_next = QPushButton("▶"); self.btn_next.clicked.connect(lambda: self.jump(1))
-        self.lbl_frame = QLabel("0000"); self.lbl_frame.setFixedWidth(50)
-        play_ctrl.addWidget(self.btn_prev); play_ctrl.addWidget(self.btn_play); play_ctrl.addWidget(self.btn_next); play_ctrl.addWidget(self.lbl_frame)
+        self.btn_prev = QPushButton("◀")
+        self.btn_prev.clicked.connect(lambda: self.jump(-1))
+        self.btn_play = QPushButton("▶ 播放")
+        self.btn_play.clicked.connect(self.toggle_play)
+        self.btn_next = QPushButton("▶")
+        self.btn_next.clicked.connect(lambda: self.jump(1))
+        self.lbl_frame = QLabel("0000"); 
+        self.lbl_frame.setFixedWidth(50)
+        play_ctrl.addWidget(self.btn_prev)
+        play_ctrl.addWidget(self.btn_play)
+        play_ctrl.addWidget(self.btn_next)
+        play_ctrl.addWidget(self.lbl_frame)
         l_layout.addLayout(play_ctrl)
         splitter.addWidget(left_container)
         
@@ -299,6 +306,9 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self.perform_undo)
         QShortcut(QKeySequence("Ctrl+Y"), self).activated.connect(self.perform_redo)
         QShortcut(QKeySequence(Qt.Key_Space), self).activated.connect(self.toggle_play)
+        # 新增：左右方向键控制帧跳转
+        QShortcut(QKeySequence(Qt.Key_Left), self).activated.connect(lambda: self.jump(-1))
+        QShortcut(QKeySequence(Qt.Key_Right), self).activated.connect(lambda: self.jump(1))
 
     # === Interaction Logic ===
     def toggle_ghost(self, state):
@@ -724,7 +734,9 @@ class MainWindow(QMainWindow):
         if self.total_frames == 0: return
         
         if self.is_playing:
-            self.timer.stop(); self.is_playing = False; self.media_player.pause()
+            self.timer.stop()
+            self.is_playing = False
+            self.media_player.pause()
             self.btn_play.setText("▶ 播放 (Space)")
         else:
             # 计算开始播放的位置

@@ -168,7 +168,7 @@ class G1Backend(QObject):
                 "smplx",
                 gender=gender,
                 use_pca=False,
-                dtype=torch.float32 
+                dtype=torch.float32
             )
             
             num_frames = data_dict["pose_body"].shape[0]
