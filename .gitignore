@@ -10,6 +10,12 @@ __pycache__/
 # Local runtime/license
 *.lic
 
+# Packaging scripts (do not open-source)
+build.py
+build_secure.py
+build_commercial.py
+generate_key.py
+
 # Build/packaging artifacts
 build/
 dist/
