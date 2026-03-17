@@ -16,7 +16,7 @@ from scipy.signal import savgol_filter
 
 # 导入模块
 from src.config import (DEFAULT_CSV_PATH, DEFAULT_MODEL_PATH, 
-                        DEFAULT_SMPLX_DATA_PATH, DEFAULT_BVH_PATH, SMPLX_BODY_MODEL_DIR, REF_LOAD_MODE, ROBOT_FPS)
+                        DEFAULT_SMPLX_DATA_PATH, DEFAULT_BVH_PATH, SMPLX_BODY_MODEL_DIR, REF_LOAD_MODE, ROBOT_FPS, set_setting)
 from src.core.backend import G1Backend
 from src.ui.widgets.mujoco_widget import MuJoCoWidget
 from src.ui.widgets.curve_editor import CurveEditor
@@ -61,7 +61,11 @@ class MainWindow(QMainWindow):
         # 2. 根据配置加载参考动作 (SMPL vs BVH)
         # 定义加载函数以避免重复代码
         def try_load_smpl():
-            if os.path.exists(DEFAULT_SMPLX_DATA_PATH) and os.path.exists(SMPLX_BODY_MODEL_DIR):
+            global SMPLX_BODY_MODEL_DIR
+            if os.path.exists(DEFAULT_SMPLX_DATA_PATH):
+                if not os.path.exists(SMPLX_BODY_MODEL_DIR):
+                    print(f"SMPL Model Dir ({SMPLX_BODY_MODEL_DIR}) not found. Skipping auto-load.")
+                    return False
                 print("[Init] Loading SMPL...")
                 if self.backend.load_smplx_data(DEFAULT_SMPLX_DATA_PATH, SMPLX_BODY_MODEL_DIR):
                     self.mujoco_widget.set_ref_data(self.backend.ref_joints, self.backend.ref_parents)
@@ -120,6 +124,13 @@ class MainWindow(QMainWindow):
         
         btn_load_smpl = QPushButton("🕺 加载参考"); btn_load_smpl.clicked.connect(self.load_smplx_ref)
 
+        btn_load_model = QPushButton("🤖 载入机器模型 (URDF/XML)")
+        btn_load_model.clicked.connect(self.load_machine_model)
+        
+        btn_load_csv = QPushButton("📂 载入动作 (CSV)")
+        btn_load_csv.clicked.connect(self.load_csv_data)
+
+        top_bar.addWidget(btn_load_model); top_bar.addWidget(btn_load_csv); top_bar.addSpacing(10)
         top_bar.addWidget(self.btn_undo); top_bar.addWidget(self.btn_redo); top_bar.addSpacing(10)
         top_bar.addWidget(self.chk_ghost); top_bar.addSpacing(10)
         top_bar.addWidget(btn_audio); top_bar.addStretch()
@@ -424,7 +435,23 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Loading SMPL-X model, please wait...")
             QApplication.processEvents()
             
-            # 使用默认配置路径作为 Model Dir
+            # 使用全局 SMPLX 目录
+            global SMPLX_BODY_MODEL_DIR
+            
+            # 如果配置的目录不符合 smplx 库要求 (必须包含 smplx 子目录)，弹窗让用户选择
+            # 注意：smplx.create 会在路径后自动拼接 "smplx"
+            if not os.path.exists(os.path.join(SMPLX_BODY_MODEL_DIR, "smplx")):
+                QMessageBox.warning(self, "依赖缺失", 
+                    f"当前的 SMPL-X 模型目录不正确: {SMPLX_BODY_MODEL_DIR}\n\n"
+                    "请选择包含 'smplx' 文件夹的父目录 (例如 body_models 文件夹)。")
+                chosen_dir = QFileDialog.getExistingDirectory(self, "选择包含 'smplx' 的 body_models 目录")
+                if chosen_dir:
+                    SMPLX_BODY_MODEL_DIR = chosen_dir
+                    set_setting("Paths", "SMPLX_BODY_MODEL_DIR", chosen_dir)
+                else:
+                    self.status_bar.showMessage("已取消加载 SMPL-X。")
+                    return
+
             if self.backend.load_smplx_data(path, SMPLX_BODY_MODEL_DIR):
                 self.mujoco_widget.set_ref_data(
                     self.backend.ref_joints, 
@@ -434,8 +461,46 @@ class MainWindow(QMainWindow):
                 self.mujoco_widget.ref_offset = np.array([0.0, 1.0, 0.0])
                 self.mujoco_widget.update()
             else:
-                QMessageBox.warning(self, "Error", "Failed to load SMPL-X. Check console for details.")
+                # 加载失败时清空 ref 数据，防止 mujoco_widget 渲染出错 (TypeError)
+                self.backend.ref_joints = None
+                self.backend.ref_parents = None
+                QMessageBox.warning(self, "Error", "Failed to load SMPL-X. \n1. 请检查 NPZ 文件是否有效\n2. 请确保选择了正确的 body_models 目录 (其下应有 smplx 子文件夹)")
 
+    def load_machine_model(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load Model (.xml/.urdf)", "", "Models (*.xml *.urdf)")
+        if path:
+            self.loaded_model_path = path
+            self.status_bar.showMessage(f"Model selected: {os.path.basename(path)}. Please load CSV next.")
+
+    def load_csv_data(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load CSV", "", "CSV Files (*.csv)")
+        if path:
+            model_path = getattr(self, "loaded_model_path", DEFAULT_MODEL_PATH)
+            if not os.path.exists(model_path):
+                QMessageBox.warning(self, "Error", "Please load a Machine Model (XML/URDF) first!")
+                return
+            
+            self.status_bar.showMessage("Loading data, please wait...")
+            QApplication.processEvents()
+            
+            success, frames = self.backend.load_data(path, model_path)
+            if success:
+                self.mujoco_widget.init_mujoco(self.backend.model, self.backend.data)
+                self.total_frames = frames
+                self.graph.setXRange(0, frames)
+                self.graph.region.setRegion([0, frames//5])
+                
+                # Refresh joint list
+                self.joint_list.clear()
+                for i, name in enumerate(self.backend.all_names):
+                    item = QListWidgetItem(f"[{i:02d}] {name.replace('_joint','')}")
+                    if i < 6: item.setForeground(Qt.cyan)
+                    self.joint_list.addItem(item)
+                    
+                self.update_frame(0)
+                self.status_bar.showMessage(f"Loaded Robot Data: {frames} frames.")
+            else:
+                QMessageBox.warning(self, "Error", "Failed to load CSV or map joints.")
 
     def load_bvh_ref(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load BVH", "", "BVH Files (*.bvh)")
@@ -631,7 +696,7 @@ class MainWindow(QMainWindow):
         # 注意：原逻辑 iloc 替换是只替换选区，但 rolling 需要上下文。
         # 简单做法：只平滑选区
         chunk_series = pd.Series(full_data[s:e+1])
-        smoothed = chunk_series.rolling(window=5, center=True).mean().fillna(method='bfill').fillna(method='ffill').values
+        smoothed = chunk_series.rolling(window=5, center=True).mean().bfill().ffill().values
         
         self.backend.set_channel_data(col, smoothed, s, e)
         self.refresh_ui("Smoothed")

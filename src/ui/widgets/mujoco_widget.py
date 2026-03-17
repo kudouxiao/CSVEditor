@@ -1,8 +1,9 @@
+import os
 import numpy as np
 import mujoco
 from PyQt5.QtWidgets import QOpenGLWidget, QSizePolicy
 from PyQt5.QtCore import Qt, QPoint, QTimer
-from PyQt5.QtGui import QMouseEvent, QWheelEvent
+from PyQt5.QtGui import QMouseEvent, QWheelEvent, QSurfaceFormat
 
 from src.config import RENDER_FLAGS, SMPL_PARENTS, LABEL_OPTIONS, FRAME_OPTIONS
 from src.utils import rotation_matrix_from_vectors
@@ -10,6 +11,7 @@ from src.utils import rotation_matrix_from_vectors
 class MuJoCoWidget(QOpenGLWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        
         self.model = None
         self.data = None
         
@@ -46,6 +48,11 @@ class MuJoCoWidget(QOpenGLWidget):
         self.setMinimumHeight(400)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setFocusPolicy(Qt.StrongFocus)
+        
+        # 强制绘制刷新，防止打包后某些环境下不会自动触发 paintGL 造成黑屏现象
+        self._force_render_timer = QTimer(self)
+        self._force_render_timer.timeout.connect(self.update)
+        self._force_render_timer.start(30)
 
     def init_mujoco(self, model, data):
         self.model = model
@@ -102,30 +109,53 @@ class MuJoCoWidget(QOpenGLWidget):
         if mode_name in self.frame_options: self.opt.frame = self.frame_options[mode_name]; self.update()
 
     def initializeGL(self):
-        if self.model and not self.con:
-            try: self.con = mujoco.MjrContext(self.model, mujoco.mjtFontScale.mjFONTSCALE_150)
-            except Exception as e: print(e)
+        """Qt 会在首次显示时调用，但如果此时 model 为空，con 就不会创建"""
+        pass
 
     def paintGL(self):
-        if not self.model or not self.data or not self.scn or not self.con: return
-        
-        viewport = mujoco.MjrRect(0, 0, self.width(), self.height())
-        
-        # 1. 更新 MuJoCo 场景
-        mujoco.mjv_updateScene(
-            self.model, self.data, self.opt, self.pert, 
-            self.cam, mujoco.mjtCatBit.mjCAT_ALL, self.scn
-        )
-        
-        # 2. 绘制调试基准点 (绿色大球)
-        self.draw_debug_marker()
+        if not self.model or not self.data or not self.scn: 
+            return
+            
+        # 核心修复：如果 con 不存在，在 paintGL 里进行懒加载初始化
+        if not self.con:
+            try:
+                self.makeCurrent() # 确保在当前 GL 线程环境下
+                self.con = mujoco.MjrContext(self.model, mujoco.mjtFontScale.mjFONTSCALE_150)
+            except Exception as e:
+                import traceback
+                print(f"[MuJoCoWidget] Failed to create MjrContext: {e}")
+                traceback.print_exc()
+                return
 
-        # 绘制参考 (Generic)
-        if self.show_ref and self.ref_joints is not None:
-            self.add_ref_to_scene()
+        if not self.con:
+            return
+        
+        try:
+            self.makeCurrent()
+            viewport = mujoco.MjrRect(0, 0, self.width(), self.height())
+            
+            # 1. 更新 MuJoCo 场景
+            mujoco.mjv_updateScene(
+                self.model, self.data, self.opt, self.pert, 
+                self.cam, mujoco.mjtCatBit.mjCAT_ALL, self.scn
+            )
+            
+            # 2. 绘制调试基准点 (绿色大球)
+            self.draw_debug_marker()
+            
+            # 3. 绘制重力投影 (CoM Warning)
+            self.draw_com_marker()
 
-        # 4. 提交渲染
-        mujoco.mjr_render(viewport, self.scn, self.con)
+            # 绘制参考 (Generic)
+            if self.show_ref and self.ref_joints is not None:
+                self.add_ref_to_scene()
+
+            # 4. 提交渲染
+            mujoco.mjr_render(viewport, self.scn, self.con)
+        except Exception as e:
+            import traceback
+            print(f"[MuJoCoWidget] PAINT GL ERROR: {e}")
+            traceback.print_exc()
 
     def draw_debug_marker(self):
         """原点绘制绿球"""
@@ -139,6 +169,42 @@ class MuJoCoWidget(QOpenGLWidget):
             rgba=[0, 1, 0, 1] # 纯绿
         )
         self.scn.ngeom += 1
+
+    def draw_com_marker(self):
+        """实时计算并绘制质心 (CoM) 和地面投影"""
+        if self.scn.ngeom >= self.scn.maxgeom: return
+        
+        try:
+            # 获取整个机器人的 CoM (通常 root 刚体是 index 1)
+            com = self.data.subtree_com[1].copy()
+            
+            # 投影到地面
+            com_ground = np.array([com[0], com[1], 0.01]) # 稍微抬高防止Z-fighting
+            root_pos = self.data.qpos[0:2]
+            
+            # 根据经验法则设定一个 15cm 的安全支撑多边形半径
+            dist = np.linalg.norm(com_ground[0:2] - root_pos)
+            is_safe = dist < 0.15
+            rgba_proj = [0, 1, 0, 0.7] if is_safe else [1, 0, 0, 0.7] # 绿 / 红警告
+            
+            # 绘制空中真实 CoM 点 (黄色)
+            mujoco.mjv_initGeom(
+                self.scn.geoms[self.scn.ngeom],
+                type=mujoco.mjtGeom.mjGEOM_SPHERE,
+                size=[0.03, 0, 0], pos=com, mat=np.eye(3).flatten(), rgba=[1, 1, 0, 1]
+            )
+            self.scn.ngeom += 1
+
+            # 绘制地面投影圈 (红绿警告)
+            if self.scn.ngeom >= self.scn.maxgeom: return
+            mujoco.mjv_initGeom(
+                self.scn.geoms[self.scn.ngeom],
+                type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+                size=[0.08, 0.005, 0], pos=com_ground, mat=np.eye(3).flatten(), rgba=rgba_proj
+            )
+            self.scn.ngeom += 1
+        except Exception as e:
+            pass
 
     def add_ref_to_scene(self):
         """通用骨架绘制函数 (支持 SMPL 和 BVH)"""

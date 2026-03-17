@@ -1,16 +1,46 @@
 import numpy as np
 import mujoco
 
+import os
+import configparser
+
+# ============ 路径定义 (用户数据) ============
+USER_DATA_DIR = os.path.join(os.path.expanduser("~"), ".g1_pro_editor")
+os.makedirs(USER_DATA_DIR, exist_ok=True)
+
+CONFIG_FILE = os.path.join(USER_DATA_DIR, "settings.ini")
+LICENSE_PATH = os.path.join(USER_DATA_DIR, "g1_editor.lic")
+
+# ============ 动态配置解析 ============
+config = configparser.ConfigParser()
+if os.path.exists(CONFIG_FILE):
+    config.read(CONFIG_FILE)
+
+def set_setting(section, key, value):
+    if not config.has_section(section):
+        config.add_section(section)
+    config.set(section, key, value)
+    with open(CONFIG_FILE, 'w') as configfile:
+        config.write(configfile)
+
+def get_setting(section, key, fallback):
+    if config.has_section(section) and config.has_option(section, key):
+        return config.get(section, key)
+    return fallback
+
 # ============ 默认路径 ============
-DEFAULT_CSV_PATH = "/home/jq/project/CSVEditor/retargeted/chuanju_12pai_v6simple.csv"
-DEFAULT_MODEL_PATH = "/home/jq/project/CSVEditor/assets/unitree_g1/g1_mocap_29dof.xml"
+DEFAULT_CSV_PATH = ""
+# 默认模型路径可以指向上层目录里的资产
+DEFAULT_MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "unitree_g1", "g1_mocap_29dof.xml"))
 
 # SMPL-X 配置
-DEFAULT_SMPLX_DATA_PATH = "/home/jq/project/CSVEditor/smplx/guolaoshi5.npz"
-SMPLX_BODY_MODEL_DIR = "/home/jq/project/CSVEditor/assets/body_models" 
+DEFAULT_SMPLX_DATA_PATH = ""
+# 默认优先读取配置文件中的路径，如果没有，则默认为当前目录下（用户自己选定一次后将覆盖此路径）
+DEFAULT_SMPLX_DIR = ""
+SMPLX_BODY_MODEL_DIR = get_setting("Paths", "SMPLX_BODY_MODEL_DIR", DEFAULT_SMPLX_DIR) 
 
 # ============ BVH 配置 ============
-DEFAULT_BVH_PATH = "/home/jq/project/CSVEditor/bvh/left71_cut-zuo.bvh" 
+DEFAULT_BVH_PATH = "" 
 
 # 可选值: "SMPL", "BVH", "AUTO" (AUTO = 优先SMPL，没有则找BVH)
 REF_LOAD_MODE = "AUTO"

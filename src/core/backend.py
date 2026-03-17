@@ -80,6 +80,8 @@ class G1Backend(QObject):
         try:
             self.df = pd.read_csv(csv_path, header=None)
             if isinstance(self.df.iloc[0, 0], str): self.df = pd.read_csv(csv_path)
+            # Cast the entire DataFrame to float immediately to save massive processing time in set_frame
+            self.df = self.df.apply(pd.to_numeric, errors='coerce').fillna(0.0).astype(float)
             self.df_orig = self.df.copy()
             self.undo_stack.clear(); self.redo_stack.clear()
             
@@ -198,7 +200,7 @@ class G1Backend(QObject):
         except Exception as e:
             print(f"[ERROR] SMPL Load Exception: {e}")
             import traceback; traceback.print_exc()
-            return str(e)
+            return False
 
     # === 新增：BVH 加载逻辑 ===
     def load_bvh_data(self, bvh_path):
@@ -218,10 +220,10 @@ class G1Backend(QObject):
             return str(e)
 
     def set_frame(self, idx):
-        if self.df is None: return
+        if self.df is None or idx >= len(self.df): return
         with self.lock:
-            line = pd.to_numeric(self.df.iloc[idx].values, errors='coerce')
-            line = np.nan_to_num(line.astype(float))
+            # Optimize: use NumPy array directly instead of iloc+to_numeric every single frame
+            line = self.df.values[idx]
             p = line[0:3]; self.data.qpos[0:3] = p * 0.001 if np.any(np.abs(p) > 50) else p
             q = line[3:7]; wxyz = np.array([q[3], q[0], q[1], q[2]])
             n = np.linalg.norm(wxyz); self.data.qpos[3:7] = wxyz/n if n > 1e-4 else [1,0,0,0]
@@ -364,12 +366,6 @@ class G1Backend(QObject):
         new_block = pd.concat([frame_to_copy] * count, ignore_index=True)
         
         # 4. 合并
-        self.df = pd.concat([part1, new_block, part2], ignore_index=True).reset_index(drop=True)
-        
-        part1 = self.df.iloc[:frame_idx+1]
-        part2 = self.df.iloc[frame_idx+1:]
-        frame_to_copy = self.df.iloc[frame_idx:frame_idx+1]
-        new_block = pd.concat([frame_to_copy] * count, ignore_index=True)
         self.df = pd.concat([part1, new_block, part2], ignore_index=True).reset_index(drop=True)
         
         # === 修改：返回插入的范围 (开始帧, 结束帧) ===

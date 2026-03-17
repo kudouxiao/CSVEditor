@@ -1,8 +1,37 @@
+# Python cache
 __pycache__/
-*.pyc
-src/config.py
+*.py[cod]
+*$py.class
 
-# 忽略你的特定大文件夹/无关文件夹
-assets/body_models/smplx/
+# Local IDE/editor
+.vscode/
+.idea/
+
+# Local runtime/license
+*.lic
+
+# Build/packaging artifacts
+build/
+dist/
+*.spec
+*.AppImage
+*.AppDir/
+*.tar.gz
+appimagetool
+appimagetool-*.AppImage
+
+# Test outputs
+*.png
+
+# Large or private data folders (keep structure via .gitkeep)
+bvh/*
+!bvh/.gitkeep
+retargeted/*
+!retargeted/.gitkeep
+smplx/*
+!smplx/.gitkeep
+assets/body_models/smplx/*
+!assets/body_models/smplx/.gitkeep
+
+# Other local archive folders
 old_version/
-
