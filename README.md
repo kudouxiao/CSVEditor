@@ -25,7 +25,6 @@ CSVEditor/
 │   ├── config.py
 │   ├── utils.py
 │   ├── core/
-│   │   ├── auth.py
 │   │   └── backend.py
 │   └── ui/
 │       ├── main_window.py
@@ -73,7 +72,6 @@ python main.py
 - `bvh/` 下的 BVH 数据
 - `smplx/` 下的参考动作 `.npz`
 - `assets/body_models/smplx/` 下的 SMPL-X body model 文件
-- 打包产物（`build/`、`dist/`、`*.AppImage`、`*.tar.gz` 等）
 
 你可以在本地把自己的数据放回这些目录后直接运行。
 
@@ -88,15 +86,3 @@ python main.py
 首次运行后，部分用户级设置会写入：
 
 - `~/.g1_pro_editor/settings.ini`
-- `~/.g1_pro_editor/g1_editor.lic`
-
-## 常见问题
-
-- MuJoCo 黑屏/无法渲染：检查显卡驱动与 OpenGL 环境。
-- 音频无法加载：确认音频格式可被 `librosa` 读取，并检查文件路径。
-- SMPL-X 无法加载：确认 `assets/body_models/smplx/` 下已放置对应模型文件。
-
-## 开源清理策略
-
-本仓库已通过 `.gitignore` 排除本地构建与数据文件，仅保留核心代码与必要模型结构，便于协作与版本管理。
-

@@ -10,7 +10,6 @@ import PyQt5.sip # Dummy import to force PyInstaller to bundle this C-extension
 import qdarktheme
 
 from src.ui.main_window import MainWindow
-from src.core.auth import verify_license, AuthDialog
 
 if __name__ == "__main__":
     # 高分屏适配
@@ -21,12 +20,6 @@ if __name__ == "__main__":
     
     # 应用主题
     qdarktheme.setup_theme("dark")
-
-    # 检查授权
-    if not verify_license():
-        auth_dialog = AuthDialog()
-        if auth_dialog.exec_() != AuthDialog.Accepted:
-            sys.exit(0)
     
     window = MainWindow()
     window.show()
