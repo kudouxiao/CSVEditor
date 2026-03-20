@@ -132,7 +132,8 @@ class MuJoCoWidget(QOpenGLWidget):
         
         try:
             self.makeCurrent()
-            viewport = mujoco.MjrRect(0, 0, self.width(), self.height())
+            dpi_scale = self.devicePixelRatio()
+            viewport = mujoco.MjrRect(0, 0, int(self.width() * dpi_scale), int(self.height() * dpi_scale))
             
             # 1. 更新 MuJoCo 场景
             mujoco.mjv_updateScene(
